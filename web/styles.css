@@ -126,6 +126,10 @@ p {
   padding: 3px;
 }
 
+.signal-toggle {
+  grid-template-columns: repeat(2, 1fr);
+}
+
 .segment {
   background: transparent;
   border: 0;
@@ -211,16 +215,28 @@ p {
 }
 
 .map-panel {
-  background: #d7edf2;
+  background: #dce6e8;
   min-height: 0;
+  overflow: hidden;
   position: relative;
 }
 
+.leaflet-map,
 #mapSvg {
-  display: block;
+  inset: 0;
+  position: absolute;
+}
+
+.leaflet-map {
+  z-index: 1;
+}
+
+#mapSvg {
+  display: none;
   height: 100%;
   min-height: 640px;
   width: 100%;
+  z-index: 1;
 }
 
 .map-legend {
@@ -234,6 +250,7 @@ p {
   left: 14px;
   padding: 8px 10px;
   position: absolute;
+  z-index: 3;
 }
 
 .legend-dot {
@@ -258,11 +275,11 @@ p {
 
 .track {
   fill: none;
-  opacity: 0.55;
+  opacity: 0.85;
   pointer-events: none;
   stroke: var(--vessel);
   stroke-linecap: round;
-  stroke-width: 2;
+  stroke-width: 4;
 }
 
 .water {
@@ -286,7 +303,7 @@ p {
 }
 
 .grid-line {
-  opacity: 0.42;
+  opacity: 0.22;
   stroke: #8ca6b4;
   stroke-dasharray: 5 8;
   stroke-width: 1;
@@ -349,6 +366,20 @@ p {
 .marker.is-selected {
   stroke: var(--accent);
   stroke-width: 4;
+}
+
+.leaflet-container {
+  background: #dce6e8;
+  color: var(--ink);
+  font: inherit;
+}
+
+.leaflet-control-attribution {
+  font-size: 10px;
+}
+
+.leaflet-control-zoom a {
+  color: var(--ink);
 }
 
 .detail-kicker {
@@ -417,6 +448,68 @@ p {
 .bar-fill {
   background: linear-gradient(90deg, var(--vessel), var(--accent));
   height: 100%;
+}
+
+.waveform-card {
+  background: #f4f7f8;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 12px 0;
+  padding: 10px;
+}
+
+.waveform-chart {
+  display: block;
+  height: 142px;
+  width: 100%;
+}
+
+.waveform-grid {
+  stroke: #c8d2dc;
+  stroke-dasharray: 4 6;
+  stroke-width: 1;
+}
+
+.waveform-rms,
+.waveform-peak {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.waveform-rms {
+  stroke: var(--vessel);
+  stroke-width: 3;
+}
+
+.waveform-peak {
+  opacity: 0.5;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.waveform-arrival {
+  stroke: var(--hydro);
+  stroke-width: 2;
+}
+
+.waveform-label,
+.waveform-arrival-label {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+.waveform-arrival-label {
+  fill: var(--hydro);
+  font-weight: 700;
+}
+
+.waveform-meta {
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  gap: 12px;
+  justify-content: space-between;
 }
 
 .timeline {

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hydrophone Vessel Workbench</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -20,9 +21,13 @@
       <aside class="sidebar">
         <div class="toolbar">
           <div class="segmented" aria-label="Layer filter">
-            <button class="segment is-active" data-mode="vessels">Vessels</button>
-            <button class="segment" data-mode="ctd">CTD</button>
-            <button class="segment" data-mode="all">All</button>
+            <button class="segment mode-segment is-active" data-mode="vessels">Vessels</button>
+            <button class="segment mode-segment" data-mode="ctd">CTD</button>
+            <button class="segment mode-segment" data-mode="all">All</button>
+          </div>
+          <div class="segmented signal-toggle" aria-label="Signal filter">
+            <button class="segment signal-segment is-active" data-signal-mode="strongest">Strongest</button>
+            <button class="segment signal-segment" data-signal-mode="all">All signals</button>
           </div>
           <input id="searchInput" type="search" placeholder="Search" autocomplete="off">
         </div>
@@ -30,6 +35,7 @@
       </aside>
 
       <section class="map-panel">
+        <div id="leafletMap" class="leaflet-map" aria-label="Real map"></div>
         <svg id="mapSvg" role="img" aria-label="Vessel and CTD map"></svg>
         <div class="map-legend">
           <span><i class="legend-dot vessel"></i>Vessel</span>
@@ -41,6 +47,7 @@
       <aside class="detail-panel" id="detailPanel"></aside>
     </section>
   </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

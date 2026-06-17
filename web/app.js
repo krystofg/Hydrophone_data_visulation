@@ -3,12 +3,18 @@ const DATA_URL = "data/app_data.json";
 const state = {
   data: null,
   mode: "vessels",
+  signalMode: "strongest",
+  strongestLimit: 80,
   selectedType: "vessel",
   selectedId: null,
-  query: ""
+  query: "",
+  leafletMap: null,
+  leafletLayers: null,
+  mapNeedsFit: true
 };
 
 const svg = document.getElementById("mapSvg");
+const leafletMapElement = document.getElementById("leafletMap");
 const entityList = document.getElementById("entityList");
 const detailPanel = document.getElementById("detailPanel");
 const stats = document.getElementById("stats");
@@ -43,6 +49,36 @@ function ctdRadius(event) {
   return Math.max(5, Math.min(11, 5 + depth / 6));
 }
 
+function finiteNumber(value, fallback = null) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function acousticScore(vessel) {
+  const audio = vessel.audio || {};
+  const rms = finiteNumber(audio.rmsDbfsMean, -120);
+  const peak = finiteNumber(audio.peakDbfs, -120);
+  const distance = finiteNumber(audio.sourceDistanceKm, finiteNumber(vessel.closestDistanceKm, 30));
+  const coverage = finiteNumber(audio.coverageSeconds, 0);
+  const distancePenalty = Math.log2(Math.max(1, distance + 1)) * 2.5;
+  return rms + Math.max(-12, peak) * 0.08 + Math.min(coverage, 60) * 0.03 - distancePenalty;
+}
+
+function strongestVessels(vessels) {
+  return vessels
+    .slice()
+    .sort((a, b) => acousticScore(b) - acousticScore(a))
+    .slice(0, state.strongestLimit);
+}
+
+function vesselLatLng(vessel) {
+  return [Number(vessel.closestLatitude), Number(vessel.closestLongitude)];
+}
+
+function ctdLatLng(event) {
+  return [Number(event.latitude), Number(event.longitude)];
+}
+
 function setSelected(type, id) {
   state.selectedType = type;
   state.selectedId = id;
@@ -60,7 +96,11 @@ function matchesQuery(item, fields) {
 }
 
 function filteredVessels() {
-  return state.data.vessels.filter((vessel) => modeAllows("vessels") && matchesQuery(vessel, ["id", "name", "shipType"]));
+  const vessels = state.data.vessels.filter((vessel) => modeAllows("vessels") && matchesQuery(vessel, ["id", "name", "shipType"]));
+  if (state.signalMode === "strongest") {
+    return strongestVessels(vessels);
+  }
+  return vessels.slice().sort((a, b) => acousticScore(b) - acousticScore(a));
 }
 
 function filteredCtd() {
@@ -75,7 +115,8 @@ function renderStats() {
     ["Event audio", metadata.eventAudioProfileCount || metadata.audioProfileCount]
   ].map(([label, value]) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`).join("");
   const source = metadata.sources.aisCsv || "no AIS source";
-  sourceLine.textContent = source;
+  const signalText = state.signalMode === "strongest" ? `showing strongest ${filteredVessels().length}` : "showing all vessel signals";
+  sourceLine.textContent = `${source} - ${signalText}`;
 }
 
 function renderList() {
@@ -88,7 +129,7 @@ function renderList() {
       <button class="entity-item vessel ${state.selectedType === "vessel" && state.selectedId === vessel.id ? "is-selected" : ""}" data-type="vessel" data-id="${vessel.id}">
         <span>
           <span class="entity-name">${clean(vessel.name)}</span>
-          <span class="entity-meta">${vessel.id} · ${clean(vessel.shipType)} · ${fmt(vessel.maxSog, 1, " kn")}</span>
+          <span class="entity-meta">${vessel.id} - ${clean(vessel.shipType)} - ${fmt(vessel.audio?.rmsDbfsMean, 1, " dBFS")}</span>
         </span>
         <span class="distance-pill">${fmt(vessel.closestDistanceKm, 2, " km")}</span>
       </button>
@@ -100,7 +141,7 @@ function renderList() {
       <button class="entity-item ctd ${state.selectedType === "ctd" && state.selectedId === String(event.id) ? "is-selected" : ""}" data-type="ctd" data-id="${event.id}">
         <span>
           <span class="entity-name">CTD ${clean(event.station || event.id)}</span>
-          <span class="entity-meta">${clean(event.startUtc)} · ${event.recordedByHydrophone ? "recorded" : "outside audio"}</span>
+          <span class="entity-meta">${clean(event.startUtc)} - ${event.recordedByHydrophone ? "recorded" : "outside audio"}</span>
         </span>
         <span class="distance-pill">${fmt(event.distanceToHydrophoneKm, 2, " km")}</span>
       </button>
@@ -138,53 +179,9 @@ function addSvgText(text, attrs = {}) {
 function renderBasemap() {
   const b = state.data.bounds;
   svg.appendChild(svgElement("rect", { x: 0, y: 0, width: 1000, height: 1000, class: "water" }));
-
   const latSpan = b.maxLat - b.minLat;
   const lonSpan = b.maxLon - b.minLon;
-  for (let i = 1; i < 5; i += 1) {
-    const lat = b.minLat + (latSpan * i) / 5;
-    const y = project(lat, b.minLon).y;
-    svg.appendChild(svgElement("line", { class: "grid-line", x1: 0, y1: y, x2: 1000, y2: y }));
-    addSvgText(`${lat.toFixed(3)} N`, { class: "grid-label", x: 12, y: y - 5 });
-
-    const lon = b.minLon + (lonSpan * i) / 5;
-    const x = project(b.minLat, lon).x;
-    svg.appendChild(svgElement("line", { class: "grid-line", x1: x, y1: 0, x2: x, y2: 1000 }));
-    addSvgText(`${lon.toFixed(3)} E`, { class: "grid-label", x: x + 5, y: 985 });
-  }
-
-  const westCoast = [
-    [b.maxLat, Math.max(b.minLon + lonSpan * 0.10, 12.58)],
-    [55.865, 12.620],
-    [55.835, 12.606],
-    [55.805, 12.631],
-    [55.770, 12.612],
-    [55.735, 12.632],
-    [55.690, 12.600],
-    [b.minLat, Math.max(b.minLon + lonSpan * 0.08, 12.56)]
-  ];
-  const eastCoast = [
-    [b.maxLat, Math.min(b.maxLon - lonSpan * 0.10, 12.86)],
-    [55.870, 12.820],
-    [55.835, 12.842],
-    [55.800, 12.830],
-    [55.765, 12.858],
-    [55.725, 12.885],
-    [55.685, 12.862],
-    [b.minLat, Math.min(b.maxLon - lonSpan * 0.08, 12.90)]
-  ];
-  const westPoly = [[b.maxLat, b.minLon], [b.minLat, b.minLon], ...westCoast.slice().reverse(), [b.maxLat, Math.max(b.minLon + lonSpan * 0.10, 12.58)]];
-  const eastPoly = [[b.maxLat, b.maxLon], [b.minLat, b.maxLon], ...eastCoast.slice().reverse(), [b.maxLat, Math.min(b.maxLon - lonSpan * 0.10, 12.86)]];
-
-  svg.appendChild(svgElement("polygon", { class: "land", points: pathFromGeo(westPoly) }));
-  svg.appendChild(svgElement("polygon", { class: "land", points: pathFromGeo(eastPoly) }));
-  svg.appendChild(svgElement("polyline", { class: "coast", points: pathFromGeo(westCoast) }));
-  svg.appendChild(svgElement("polyline", { class: "coast", points: pathFromGeo(eastCoast) }));
-
-  const denmark = project(b.minLat + latSpan * 0.76, b.minLon + lonSpan * 0.12);
-  const sweden = project(b.minLat + latSpan * 0.78, b.maxLon - lonSpan * 0.17);
-  addSvgText("Denmark", { class: "place-label", x: denmark.x, y: denmark.y });
-  addSvgText("Sweden", { class: "place-label", x: sweden.x, y: sweden.y });
+  addSvgText("Real map tiles unavailable", { class: "place-label", x: 36, y: 58 });
 
   const scaleLat = b.minLat + latSpan * 0.08;
   const scaleLon = b.minLon + lonSpan * 0.10;
@@ -199,27 +196,139 @@ function renderBasemap() {
   svg.appendChild(svgElement("path", { class: "north-arrow", d: "M960 52 L951 68 L969 68 Z" }));
 }
 
-function renderMap() {
+function initializeLeafletMap() {
+  if (!window.L || !leafletMapElement) return false;
+  if (state.leafletMap) return true;
+
+  svg.style.display = "none";
+  leafletMapElement.style.display = "block";
+  state.leafletMap = L.map(leafletMapElement, {
+    preferCanvas: true,
+    zoomControl: true,
+    attributionControl: true
+  });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(state.leafletMap);
+  state.leafletLayers = L.layerGroup().addTo(state.leafletMap);
+  return true;
+}
+
+function leafletStyle(kind, selected = false, muted = false) {
+  const colors = {
+    vessel: "#147d8c",
+    ctd: muted ? "#8d99a8" : "#8060b2",
+    hydrophone: "#c53b2c"
+  };
+  return {
+    color: selected ? "#d59c22" : "#ffffff",
+    fillColor: colors[kind],
+    fillOpacity: kind === "hydrophone" ? 0.95 : 0.88,
+    opacity: 1,
+    radius: kind === "hydrophone" ? 9 : undefined,
+    weight: selected ? 4 : 2
+  };
+}
+
+function fitLeafletMap(vessels, ctdEvents) {
+  if (!state.mapNeedsFit || !state.leafletMap) return;
+  const points = [
+    [state.data.hydrophone.latitude, state.data.hydrophone.longitude],
+    ...vessels.map(vesselLatLng),
+    ...ctdEvents.map(ctdLatLng)
+  ].filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+  if (!points.length) return;
+  state.leafletMap.fitBounds(L.latLngBounds(points), { padding: [32, 32], maxZoom: 14 });
+  state.mapNeedsFit = false;
+}
+
+function renderLeafletMap() {
+  if (!initializeLeafletMap()) return false;
+  const vessels = filteredVessels();
+  const ctdEvents = filteredCtd();
+  state.leafletLayers.clearLayers();
+
+  const selected = selectedVessel();
+  if (state.selectedType === "vessel" && selected && modeAllows("vessels")) {
+    const selectedTrack = selected.track
+      .map((point) => [Number(point.latitude), Number(point.longitude)])
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+    if (selectedTrack.length > 1) {
+      L.polyline(selectedTrack, {
+        color: "#0b7180",
+        opacity: 0.9,
+        weight: 4,
+        lineCap: "round",
+        lineJoin: "round"
+      }).addTo(state.leafletLayers);
+    }
+  }
+
+  if (modeAllows("vessels")) {
+    for (const vessel of vessels) {
+      const [lat, lon] = vesselLatLng(vessel);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const selectedMarker = state.selectedType === "vessel" && state.selectedId === vessel.id;
+      const marker = L.circleMarker([lat, lon], {
+        ...leafletStyle("vessel", selectedMarker),
+        radius: vesselRadius(vessel)
+      }).addTo(state.leafletLayers);
+      marker.bindTooltip(`${vessel.name} ${fmt(vessel.audio?.rmsDbfsMean, 1, " dBFS")}`);
+      marker.on("click", () => setSelected("vessel", vessel.id));
+    }
+  }
+
+  if (modeAllows("ctd")) {
+    for (const event of ctdEvents) {
+      const [lat, lon] = ctdLatLng(event);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const selectedMarker = state.selectedType === "ctd" && state.selectedId === String(event.id);
+      const marker = L.circleMarker([lat, lon], {
+        ...leafletStyle("ctd", selectedMarker, !event.recordedByHydrophone),
+        radius: ctdRadius(event)
+      }).addTo(state.leafletLayers);
+      marker.bindTooltip(`CTD ${event.station || event.id}`);
+      marker.on("click", () => setSelected("ctd", String(event.id)));
+    }
+  }
+
+  const hydro = state.data.hydrophone;
+  L.circleMarker([hydro.latitude, hydro.longitude], leafletStyle("hydrophone", true))
+    .bindTooltip(hydro.label)
+    .addTo(state.leafletLayers);
+
+  fitLeafletMap(vessels, ctdEvents);
+  return true;
+}
+
+function renderFallbackMap() {
+  if (leafletMapElement) leafletMapElement.style.display = "none";
+  svg.style.display = "block";
   svg.innerHTML = "";
   svg.setAttribute("viewBox", "0 0 1000 1000");
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
   renderBasemap();
 
-  if (modeAllows("vessels")) {
-    for (const vessel of filteredVessels()) {
-      if (!vessel.track.length) continue;
-      const points = vessel.track.map((point) => {
-        const p = project(point.latitude, point.longitude);
-        return `${p.x.toFixed(2)},${p.y.toFixed(2)}`;
-      }).join(" ");
+  if (state.selectedType === "vessel" && modeAllows("vessels")) {
+    const vessel = selectedVessel();
+    if (vessel && vessel.track.length) {
+      const points = vessel.track
+        .map((point) => {
+          const p = project(point.latitude, point.longitude);
+          return `${p.x.toFixed(2)},${p.y.toFixed(2)}`;
+        })
+        .join(" ");
       const track = svgElement("polyline", {
-        class: `track ${state.selectedType === "vessel" && state.selectedId === vessel.id ? "is-selected" : ""}`,
+        class: "track is-selected",
         points
       });
       svg.appendChild(track);
     }
+  }
 
+  if (modeAllows("vessels")) {
     for (const vessel of filteredVessels()) {
       const p = project(vessel.closestLatitude, vessel.closestLongitude);
       const marker = svgElement("circle", {
@@ -266,6 +375,11 @@ function renderMap() {
   svg.appendChild(marker);
 }
 
+function renderMap() {
+  if (renderLeafletMap()) return;
+  renderFallbackMap();
+}
+
 function selectedVessel() {
   return state.data.vessels.find((vessel) => vessel.id === state.selectedId) || state.data.vessels[0];
 }
@@ -274,13 +388,85 @@ function selectedCtd() {
   return state.data.ctdEvents.find((event) => String(event.id) === String(state.selectedId)) || state.data.ctdEvents[0];
 }
 
+function durationSeconds(startUtc, endUtc) {
+  const start = Date.parse(startUtc || "");
+  const end = Date.parse(endUtc || "");
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  return (end - start) / 1000;
+}
+
+function audioWaveformHtml(audio) {
+  const waveform = audio.waveform || {};
+  const times = Array.isArray(waveform.timesSeconds) ? waveform.timesSeconds.map(Number) : [];
+  const rms = Array.isArray(waveform.rmsDbfs) ? waveform.rmsDbfs.map(Number) : [];
+  const peak = Array.isArray(waveform.peakDbfs) ? waveform.peakDbfs.map(Number) : [];
+  const rows = times.map((time, index) => ({
+    time,
+    rms: rms[index],
+    peak: peak[index]
+  })).filter((row) => Number.isFinite(row.time) && Number.isFinite(row.rms));
+  if (rows.length < 2) return "";
+
+  const width = 320;
+  const height = 118;
+  const padX = 12;
+  const padY = 14;
+  const duration = durationSeconds(audio.startUtc, audio.endUtc) || Math.max(...rows.map((row) => row.time));
+  const eventOffset = Number(audio.eventOffsetSeconds);
+  const markerTime = Number.isFinite(eventOffset) ? eventOffset : duration / 2;
+  const values = rows.flatMap((row) => Number.isFinite(row.peak) ? [row.rms, row.peak] : [row.rms]);
+  const minDb = Math.floor(Math.min(...values) / 5) * 5;
+  const maxDb = Math.ceil(Math.max(...values) / 5) * 5;
+  const span = Math.max(1, maxDb - minDb);
+  const xForTime = (time) => padX + (Math.max(0, Math.min(duration, time)) / duration) * (width - padX * 2);
+  const yForDb = (db) => padY + (1 - ((db - minDb) / span)) * (height - padY * 2);
+  const rmsPoints = rows.map((row) => `${xForTime(row.time).toFixed(1)},${yForDb(row.rms).toFixed(1)}`).join(" ");
+  const peakPoints = rows
+    .filter((row) => Number.isFinite(row.peak))
+    .map((row) => `${xForTime(row.time).toFixed(1)},${yForDb(row.peak).toFixed(1)}`)
+    .join(" ");
+  const markerX = xForTime(markerTime).toFixed(1);
+  const loudest = rows.reduce((best, row) => (row.rms > best.rms ? row : best), rows[0]);
+
+  return `
+    <div class="waveform-card">
+      <svg class="waveform-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Audio envelope">
+        <line class="waveform-grid" x1="${padX}" y1="${padY}" x2="${width - padX}" y2="${padY}"></line>
+        <line class="waveform-grid" x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}"></line>
+        <polyline class="waveform-peak" points="${peakPoints}"></polyline>
+        <polyline class="waveform-rms" points="${rmsPoints}"></polyline>
+        <line class="waveform-arrival" x1="${markerX}" y1="${padY}" x2="${markerX}" y2="${height - padY}"></line>
+        <text class="waveform-label" x="${padX}" y="11">${maxDb} dBFS</text>
+        <text class="waveform-label" x="${padX}" y="${height - 3}">${minDb} dBFS</text>
+        <text class="waveform-arrival-label" x="${Math.min(width - 64, Number(markerX) + 4).toFixed(1)}" y="28">Arrival</text>
+      </svg>
+      <div class="waveform-meta">
+        <span>Window ${fmt(duration, 1, " s")}</span>
+        <span>Loudest ${fmt(loudest.time, 1, " s")} / ${fmt(loudest.rms, 1, " dBFS")}</span>
+      </div>
+    </div>
+  `;
+}
+
 function audioProfileHtml(audio) {
   if (!audio) {
     return `<p>No audio profile linked yet</p>`;
   }
+  const sourceDistance = audio.sourceDistanceKm === null || audio.sourceDistanceKm === undefined
+    ? null
+    : Number(audio.sourceDistanceKm);
+  const delay = audio.propagationDelaySeconds === null || audio.propagationDelaySeconds === undefined
+    ? null
+    : Number(audio.propagationDelaySeconds);
+  const timingRows = [
+    audio.sourceTimeUtc ? `Source time: ${clean(audio.sourceTimeUtc)}` : "",
+    audio.eventTimeUtc ? `Hydrophone arrival: ${clean(audio.eventTimeUtc)}` : "",
+    Number.isFinite(sourceDistance) ? `Source distance: ${fmt(sourceDistance, 2, " km")}` : "",
+    Number.isFinite(delay) ? `Sound delay: ${fmt(delay, 1, " s")}` : ""
+  ].filter(Boolean).join("<br>");
   if (audio.captured === false) {
     return `
-      <div class="timeline">${clean(audio.captureNote)}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
+      <div class="timeline">${clean(audio.captureNote)}<br>${timingRows}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
     `;
   }
   const bands = Object.entries(audio.bands || {});
@@ -305,8 +491,9 @@ function audioProfileHtml(audio) {
       <div class="metric"><span>Crest</span><b>${fmt(audio.crestFactorDb, 1, " dB")}</b></div>
       <div class="metric"><span>Coverage</span><b>${fmt(audio.coverageSeconds, 1, " s")}</b></div>
     </div>
+    ${audioWaveformHtml(audio)}
     ${bandRows}
-    <div class="timeline">${clean(audio.captureNote)}<br>${clean(audio.fileName)}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
+    <div class="timeline">${clean(audio.captureNote)}<br>${timingRows}<br>${clean(audio.fileName)}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
   `;
 }
 
@@ -314,7 +501,7 @@ function renderVesselDetail(vessel) {
   detailPanel.innerHTML = `
     <div class="detail-kicker">Vessel</div>
     <h2>${clean(vessel.name)}</h2>
-    <p>${vessel.id} · ${clean(vessel.shipType)} · ${clean(vessel.typeOfMobile)}</p>
+    <p>${vessel.id} - ${clean(vessel.shipType)} - ${clean(vessel.typeOfMobile)}</p>
     <div class="detail-grid">
       <div class="metric"><span>Closest point</span><b>${fmt(vessel.closestDistanceKm, 2, " km")}</b></div>
       <div class="metric"><span>Bearing</span><b>${fmt(vessel.closestBearingDeg, 0, " deg")}</b></div>
@@ -350,6 +537,10 @@ function renderCtdDetail(event) {
 }
 
 function renderDetail() {
+  if (!state.selectedId) {
+    detailPanel.innerHTML = `<div class="empty">No matching rows</div>`;
+    return;
+  }
   if (state.selectedType === "ctd") {
     const event = selectedCtd();
     if (event) renderCtdDetail(event);
@@ -360,13 +551,20 @@ function renderDetail() {
 }
 
 function ensureSelection() {
-  if (state.selectedId) return;
-  if (state.data.vessels.length) {
+  const vessels = filteredVessels();
+  const ctdEvents = filteredCtd();
+  const selectedVesselVisible = state.selectedType === "vessel" && vessels.some((vessel) => vessel.id === state.selectedId);
+  const selectedCtdVisible = state.selectedType === "ctd" && ctdEvents.some((event) => String(event.id) === String(state.selectedId));
+  if (selectedVesselVisible || selectedCtdVisible) return;
+
+  if (vessels.length) {
     state.selectedType = "vessel";
-    state.selectedId = state.data.vessels[0].id;
-  } else if (state.data.ctdEvents.length) {
+    state.selectedId = vessels[0].id;
+  } else if (ctdEvents.length) {
     state.selectedType = "ctd";
-    state.selectedId = String(state.data.ctdEvents[0].id);
+    state.selectedId = String(ctdEvents[0].id);
+  } else {
+    state.selectedId = null;
   }
 }
 
@@ -378,25 +576,32 @@ function render() {
   renderDetail();
 }
 
-document.querySelectorAll(".segment").forEach((button) => {
+document.querySelectorAll(".mode-segment").forEach((button) => {
   button.addEventListener("click", () => {
-    document.querySelectorAll(".segment").forEach((segment) => segment.classList.remove("is-active"));
+    document.querySelectorAll(".mode-segment").forEach((segment) => segment.classList.remove("is-active"));
     button.classList.add("is-active");
     state.mode = button.dataset.mode;
-    if (state.mode === "ctd" && state.data.ctdEvents.length) {
-      state.selectedType = "ctd";
-      state.selectedId = String(state.data.ctdEvents[0].id);
-    }
-    if (state.mode === "vessels" && state.data.vessels.length) {
-      state.selectedType = "vessel";
-      state.selectedId = state.data.vessels[0].id;
-    }
+    state.selectedId = null;
+    state.mapNeedsFit = true;
+    render();
+  });
+});
+
+document.querySelectorAll(".signal-segment").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll(".signal-segment").forEach((segment) => segment.classList.remove("is-active"));
+    button.classList.add("is-active");
+    state.signalMode = button.dataset.signalMode;
+    state.selectedId = null;
+    state.mapNeedsFit = true;
     render();
   });
 });
 
 searchInput.addEventListener("input", () => {
   state.query = searchInput.value.trim().toLowerCase();
+  state.selectedId = null;
+  state.mapNeedsFit = true;
   render();
 });
 

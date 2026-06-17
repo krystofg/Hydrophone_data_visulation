@@ -64,6 +64,24 @@ Output:
 
 - `outputs/processing/audio_ais_events.csv`
 
+## 6. Build per-event acoustic profiles and the clickable app
+
+After AIS and recording features exist, build the app data and per-event audio windows:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\build_clickable_app.ps1
+```
+
+The event profile step aligns each vessel by estimated hydrophone arrival time:
+
+```text
+arrival time = AIS source time + distance_to_hydrophone / 1500 m/s
+```
+
+The final app data hides vessels without a captured event acoustic profile.
+Each captured event profile stores a compact audio envelope, not raw samples, so the web app can draw a quick sound graph without embedding the original WAV data.
+The clickable app defaults to the strongest acoustic vessel candidates and draws AIS tracks only for the selected vessel.
+
 ## One-command overnight run
 
 After the smoke tests pass, run the full sequence with logging:

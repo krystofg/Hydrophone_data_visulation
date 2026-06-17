@@ -5,7 +5,7 @@ $Python = "C:\Users\kryst\.cache\codex-runtimes\codex-primary-runtime\dependenci
 
 Set-Location $RepoRoot
 
-& $Python scripts\build_web_app_data.py
+& $Python scripts\build_web_app_data.py --include-vessels-without-audio
 & $Python scripts\build_event_audio_profiles.py
 & $Python scripts\build_web_app_data.py
 & $Python scripts\build_standalone_app.py

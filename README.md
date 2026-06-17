@@ -66,7 +66,7 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build_clickable_app.ps1
 
 Open `web/hydrophone_app.html` in a browser.
 
-The app shows vessels, CTD casts, the hydrophone location, and per-event acoustic profiles for selected vessels and CTD casts. See `docs/local_web_app.md`.
+The app shows CTD casts, the hydrophone location, and only vessels with captured per-event acoustic profiles on a Leaflet/OpenStreetMap basemap. Vessel profiles are aligned by estimated hydrophone arrival time, using AIS source time plus distance divided by sound speed in water, and each captured profile includes a compact sound-envelope graph. The default view shows the strongest acoustic candidates; `All signals` reveals every captured vessel. See `docs/local_web_app.md`.
 
 For full processing from raw AIS/audio outputs through the final app:
 

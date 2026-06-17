@@ -23,6 +23,7 @@ from hydrophone_pipeline import (
     db_from_power,
     decode_pcm_bytes,
     parse_datetime,
+    parse_float,
     parse_recording_start,
 )
 
@@ -31,11 +32,18 @@ OUTPUT_COLUMNS = [
     "event_type",
     "event_id",
     "event_label",
+    "source_time_utc",
     "event_time_utc",
+    "source_distance_km",
+    "propagation_delay_seconds",
+    "event_offset_seconds",
     "window_start_utc",
     "window_end_utc",
     "coverage_seconds",
     "recording_files",
+    "waveform_times_seconds",
+    "waveform_rms_dbfs",
+    "waveform_peak_dbfs",
     "sample_rate_hz",
     "channels",
     "rms_dbfs_ch1",
@@ -88,7 +96,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-vessels", type=int, default=0, help="Maximum vessels to profile; 0 means all.")
     parser.add_argument("--vessel-window-seconds", type=float, default=45.0)
     parser.add_argument("--ctd-padding-seconds", type=float, default=20.0)
+    parser.add_argument("--sound-speed-m-s", type=float, default=1500.0)
     parser.add_argument("--block-seconds", type=float, default=5.0)
+    parser.add_argument("--waveform-bins", type=int, default=120)
     parser.add_argument("--cache-files", type=int, default=8)
     return parser.parse_args()
 
@@ -131,11 +141,12 @@ def extract_audio_window(
     cache: RecordingCache,
     start: dt.datetime,
     end: dt.datetime,
-) -> tuple[np.ndarray | None, int | None, list[str]]:
+) -> tuple[np.ndarray | None, int | None, list[str], float]:
     chunks: list[np.ndarray] = []
     files: list[str] = []
     sample_rate: int | None = None
     channels: int | None = None
+    first_offset_seconds: float | None = None
 
     for info in recordings:
         if info.end <= start:
@@ -158,10 +169,54 @@ def extract_audio_window(
         samples = cache.read(info)
         chunks.append(samples[frame_start:frame_end])
         files.append(info.path.name)
+        if first_offset_seconds is None:
+            first_offset_seconds = (overlap_start - start).total_seconds()
 
     if not chunks or sample_rate is None:
-        return None, None, []
-    return np.concatenate(chunks, axis=0), sample_rate, files
+        return None, None, [], 0.0
+    return np.concatenate(chunks, axis=0), sample_rate, files, first_offset_seconds or 0.0
+
+
+def compute_waveform_summary(
+    samples: np.ndarray,
+    sample_rate: int,
+    start_offset_seconds: float,
+    bin_count: int,
+) -> dict[str, str]:
+    if bin_count <= 0 or samples.size == 0:
+        return {
+            "waveform_times_seconds": "[]",
+            "waveform_rms_dbfs": "[]",
+            "waveform_peak_dbfs": "[]",
+        }
+    if samples.ndim == 1:
+        mono = samples.astype(np.float32)
+    else:
+        mono = samples.astype(np.float32).mean(axis=1)
+
+    total_frames = mono.shape[0]
+    bins = min(bin_count, total_frames)
+    times: list[float] = []
+    rms_values: list[float] = []
+    peak_values: list[float] = []
+    for index in range(bins):
+        frame_start = int(round(index * total_frames / bins))
+        frame_end = int(round((index + 1) * total_frames / bins))
+        if frame_end <= frame_start:
+            continue
+        segment = mono[frame_start:frame_end]
+        rms = float(np.sqrt(np.mean(segment.astype(np.float64) ** 2)))
+        peak = float(np.max(np.abs(segment)))
+        center_seconds = start_offset_seconds + ((frame_start + frame_end) / 2.0 / sample_rate)
+        times.append(round(center_seconds, 3))
+        rms_values.append(round(db_from_amplitude(rms), 3))
+        peak_values.append(round(db_from_amplitude(peak), 3))
+
+    return {
+        "waveform_times_seconds": json.dumps(times, separators=(",", ":")),
+        "waveform_rms_dbfs": json.dumps(rms_values, separators=(",", ":")),
+        "waveform_peak_dbfs": json.dumps(peak_values, separators=(",", ":")),
+    }
 
 
 def compute_features(
@@ -228,6 +283,9 @@ def empty_feature_values() -> dict[str, str]:
         "peak_dbfs": "",
         "crest_factor_db": "",
         "stereo_correlation": "",
+        "waveform_times_seconds": "[]",
+        "waveform_rms_dbfs": "[]",
+        "waveform_peak_dbfs": "[]",
     }
     for band in DEFAULT_BANDS:
         values[band_column(*band)] = ""
@@ -246,14 +304,18 @@ def profile_row(
     event_type: str,
     event_id: str,
     event_label: str,
+    source_time: dt.datetime,
     event_time: dt.datetime,
+    source_distance_km: float | None,
+    propagation_delay_seconds: float,
     window_start: dt.datetime,
     window_end: dt.datetime,
     recordings: list[RecordingInfo],
     cache: RecordingCache,
     block_seconds: float,
+    waveform_bins: int,
 ) -> dict[str, str]:
-    samples, sample_rate, files = extract_audio_window(
+    samples, sample_rate, files, audio_offset_seconds = extract_audio_window(
         recordings=recordings,
         cache=cache,
         start=window_start,
@@ -263,11 +325,18 @@ def profile_row(
         "event_type": event_type,
         "event_id": event_id,
         "event_label": event_label,
+        "source_time_utc": iso(source_time),
         "event_time_utc": iso(event_time),
+        "source_distance_km": f"{source_distance_km:.4f}" if source_distance_km is not None else "",
+        "propagation_delay_seconds": f"{propagation_delay_seconds:.3f}",
+        "event_offset_seconds": f"{(event_time - window_start).total_seconds():.3f}",
         "window_start_utc": iso(window_start),
         "window_end_utc": iso(window_end),
         "coverage_seconds": "0.000",
         "recording_files": "",
+        "waveform_times_seconds": "[]",
+        "waveform_rms_dbfs": "[]",
+        "waveform_peak_dbfs": "[]",
         "captured": "false",
         "capture_note": "No hydrophone recording overlaps this event window.",
     }
@@ -279,6 +348,7 @@ def profile_row(
     row["recording_files"] = ";".join(files)
     row["captured"] = "true"
     row["capture_note"] = "Hydrophone audio was available for this event window."
+    row.update(compute_waveform_summary(samples, sample_rate, audio_offset_seconds, waveform_bins))
     row.update(compute_features(samples, sample_rate, block_seconds))
     return row
 
@@ -290,6 +360,7 @@ def load_events(
     ctd_padding_seconds: float,
     audio_start: dt.datetime,
     audio_end: dt.datetime,
+    sound_speed_m_s: float,
 ):
     data = json.loads(app_data_path.read_text(encoding="utf-8"))
     half_vessel = dt.timedelta(seconds=vessel_window_seconds / 2)
@@ -305,7 +376,10 @@ def load_events(
             point_time = safe_parse_datetime(point.get("timestamp"))
             if point_time is None:
                 continue
-            if point_time + half_vessel < audio_start or point_time - half_vessel > audio_end:
+            distance_km = parse_float(point.get("distanceKm"))
+            delay_seconds = ((distance_km or 0.0) * 1000.0) / sound_speed_m_s
+            arrival_time = point_time + dt.timedelta(seconds=delay_seconds)
+            if arrival_time + half_vessel < audio_start or arrival_time - half_vessel > audio_end:
                 continue
             track_candidates.append(point)
 
@@ -314,17 +388,24 @@ def load_events(
                 track_candidates,
                 key=lambda point: float(point.get("distanceKm") or float("inf")),
             )
-            event_time = safe_parse_datetime(best_point.get("timestamp"))
+            source_time = safe_parse_datetime(best_point.get("timestamp"))
+            source_distance_km = parse_float(best_point.get("distanceKm"))
         else:
-            event_time = safe_parse_datetime(vessel.get("closestTimestamp"))
-        if event_time is None:
+            source_time = safe_parse_datetime(vessel.get("closestTimestamp"))
+            source_distance_km = parse_float(vessel.get("closestDistanceKm"))
+        if source_time is None:
             continue
+        propagation_delay_seconds = ((source_distance_km or 0.0) * 1000.0) / sound_speed_m_s
+        event_time = source_time + dt.timedelta(seconds=propagation_delay_seconds)
         events.append(
             {
                 "event_type": "vessel",
                 "event_id": str(vessel.get("id", "")),
                 "event_label": str(vessel.get("name") or vessel.get("id") or "Vessel"),
+                "source_time": source_time,
                 "event_time": event_time,
+                "source_distance_km": source_distance_km,
+                "propagation_delay_seconds": propagation_delay_seconds,
                 "window_start": event_time - half_vessel,
                 "window_end": event_time + half_vessel,
             }
@@ -338,14 +419,20 @@ def load_events(
             continue
         station = str(event.get("station") or event.get("id") or event.get("fileName") or "CTD")
         midpoint = start + (end - start) / 2
+        source_distance_km = parse_float(event.get("distanceToHydrophoneKm"))
+        propagation_delay_seconds = ((source_distance_km or 0.0) * 1000.0) / sound_speed_m_s
+        arrival_midpoint = midpoint + dt.timedelta(seconds=propagation_delay_seconds)
         events.append(
             {
                 "event_type": "ctd",
                 "event_id": station,
                 "event_label": f"CTD {station}",
-                "event_time": midpoint,
-                "window_start": start - ctd_padding,
-                "window_end": end + ctd_padding,
+                "source_time": midpoint,
+                "event_time": arrival_midpoint,
+                "source_distance_km": source_distance_km,
+                "propagation_delay_seconds": propagation_delay_seconds,
+                "window_start": start + dt.timedelta(seconds=propagation_delay_seconds) - ctd_padding,
+                "window_end": end + dt.timedelta(seconds=propagation_delay_seconds) + ctd_padding,
             }
         )
     return events
@@ -362,6 +449,7 @@ def main() -> None:
         args.ctd_padding_seconds,
         audio_start=recordings[0].start,
         audio_end=recordings[-1].end,
+        sound_speed_m_s=args.sound_speed_m_s,
     )
     fieldnames = OUTPUT_COLUMNS + [band_column(*band) for band in DEFAULT_BANDS]
 
@@ -375,12 +463,16 @@ def main() -> None:
                 event_type=event["event_type"],
                 event_id=event["event_id"],
                 event_label=event["event_label"],
+                source_time=event["source_time"],
                 event_time=event["event_time"],
+                source_distance_km=event["source_distance_km"],
+                propagation_delay_seconds=event["propagation_delay_seconds"],
                 window_start=event["window_start"],
                 window_end=event["window_end"],
                 recordings=recordings,
                 cache=cache,
                 block_seconds=args.block_seconds,
+                waveform_bins=args.waveform_bins,
             )
             writer.writerow(row)
             captured += row["captured"] == "true"

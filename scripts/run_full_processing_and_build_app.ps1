@@ -31,7 +31,7 @@ function Invoke-Step {
 Invoke-Step -Name "prepare-ais-full" -Arguments @($Pipeline, "prepare-ais", "--engine", "auto")
 Invoke-Step -Name "process-audio-full" -Arguments @($Pipeline, "process-audio", "--resume")
 Invoke-Step -Name "join-audio-ais-full" -Arguments @($Pipeline, "join-audio-ais")
-Invoke-Step -Name "build-web-data-initial" -Arguments @("scripts\build_web_app_data.py")
+Invoke-Step -Name "build-web-data-initial" -Arguments @("scripts\build_web_app_data.py", "--include-vessels-without-audio")
 Invoke-Step -Name "build-event-audio-profiles-full" -Arguments @("scripts\build_event_audio_profiles.py")
 Invoke-Step -Name "build-web-data-final" -Arguments @("scripts\build_web_app_data.py")
 Invoke-Step -Name "build-standalone-app" -Arguments @("scripts\build_standalone_app.py")

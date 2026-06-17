@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-vessels", type=int, default=0, help="Maximum vessels to include; 0 means all.")
     parser.add_argument("--max-track-points-per-vessel", type=int, default=80)
     parser.add_argument("--max-ais-rows", type=int, default=0, help="Maximum AIS rows to read; 0 means all.")
+    parser.add_argument(
+        "--include-vessels-without-audio",
+        action="store_true",
+        help="Include vessels without captured event audio. Used only for intermediate profile builds.",
+    )
     return parser.parse_args()
 
 
@@ -115,6 +120,24 @@ def parse_float(value: object) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def parse_float_list(value: object) -> list[float]:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    values: list[float] = []
+    for item in parsed:
+        number = parse_float(item)
+        if number is not None:
+            values.append(number)
+    return values
 
 
 def parse_datetime(value: object) -> dt.datetime | None:
@@ -208,11 +231,18 @@ def read_audio_profiles(path: Path | None) -> list[dict[str, object]]:
 
 
 def profile_from_row(row: dict[str, str]) -> dict[str, object]:
+    waveform_times = parse_float_list(row.get("waveform_times_seconds"))
+    waveform_rms = parse_float_list(row.get("waveform_rms_dbfs"))
+    waveform_peak = parse_float_list(row.get("waveform_peak_dbfs"))
     return {
         "fileName": row.get("file_name") or row.get("recording_files", ""),
+        "sourceTimeUtc": row.get("source_time_utc", ""),
         "startUtc": row.get("start_utc") or row.get("window_start_utc", ""),
         "endUtc": row.get("end_utc") or row.get("window_end_utc", ""),
         "eventTimeUtc": row.get("event_time_utc", ""),
+        "eventOffsetSeconds": parse_float(row.get("event_offset_seconds")),
+        "sourceDistanceKm": parse_float(row.get("source_distance_km")),
+        "propagationDelaySeconds": parse_float(row.get("propagation_delay_seconds")),
         "rmsDbfsMean": parse_float(row.get("rms_dbfs_mean")),
         "peakDbfs": parse_float(row.get("peak_dbfs")),
         "crestFactorDb": parse_float(row.get("crest_factor_db")),
@@ -225,6 +255,11 @@ def profile_from_row(row: dict[str, str]) -> dict[str, object]:
             "100-500 Hz": parse_float(row.get("band_100_500_db")),
             "500-2000 Hz": parse_float(row.get("band_500_2000_db")),
             "2000-10000 Hz": parse_float(row.get("band_2000_10000_db")),
+        },
+        "waveform": {
+            "timesSeconds": waveform_times,
+            "rmsDbfs": waveform_rms,
+            "peakDbfs": waveform_peak,
         },
         "nearbyVesselCount": parse_float(row.get("nearby_vessel_count")),
         "closestShipId": row.get("closest_ship_id", ""),
@@ -282,6 +317,7 @@ def read_vessels(
     path: Path | None,
     profiles: list[dict[str, object]],
     event_profiles: dict[str, dict[str, dict[str, object]]],
+    include_without_audio: bool,
     max_vessels: int,
     max_track_points_per_vessel: int,
     max_ais_rows: int,
@@ -354,6 +390,10 @@ def read_vessels(
             "maxDraught": max(draught_values) if draught_values else None,
         }
         vessel["audio"] = event_profiles.get("vessel", {}).get(ship_id) or audio_for_vessel(vessel, profiles)
+        if not include_without_audio:
+            audio = vessel.get("audio")
+            if not audio or audio.get("captured") is not True:
+                continue
         vessels.append(vessel)
 
     vessels.sort(
@@ -435,6 +475,7 @@ def main() -> None:
         ais_csv,
         profiles,
         event_profiles,
+        include_without_audio=args.include_vessels_without_audio,
         max_vessels=args.max_vessels,
         max_track_points_per_vessel=args.max_track_points_per_vessel,
         max_ais_rows=args.max_ais_rows,
