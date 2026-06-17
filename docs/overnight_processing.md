@@ -80,7 +80,7 @@ arrival time = AIS source time + distance_to_hydrophone / 1500 m/s
 
 The final app data hides vessels without a captured event acoustic profile.
 Each captured event profile stores a compact audio envelope, not raw samples, so the web app can draw a quick sound graph without embedding the original WAV data.
-The clickable app defaults to the strongest acoustic vessel candidates and draws AIS tracks only for the selected vessel.
+The clickable app defaults to likely isolated nearby AIS/audio vessel candidates, draws radial geometry only for the selected vessel or CTD cast, and draws AIS tracks only for the selected vessel.
 
 ## One-command overnight run
 

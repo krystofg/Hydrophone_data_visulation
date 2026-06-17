@@ -66,10 +66,15 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build_clickable_app.ps1
 
 Open `web/hydrophone_app.html` in a browser.
 
-The app shows CTD casts, the hydrophone location, and only vessels with captured per-event acoustic profiles on a Leaflet/OpenStreetMap basemap. Vessel profiles are aligned by estimated hydrophone arrival time, using AIS source time plus distance divided by sound speed in water, and each captured profile includes a compact sound-envelope graph. The default view shows the strongest acoustic candidates; `All signals` reveals every captured vessel. See `docs/local_web_app.md`.
+The app shows CTD casts, the hydrophone location, and only vessels with captured per-event acoustic profiles on a Leaflet basemap. Vessel profiles are aligned by estimated hydrophone arrival time, using AIS source time plus distance divided by sound speed in water, and each captured profile includes a waveform plus sound-intensity gradient. The default view shows likely isolated nearby AIS/audio candidates; `All signals` reveals every captured vessel, including ambiguous shared audio windows. See `docs/local_web_app.md`.
+
+Event profiles also compute a two-channel TDOA direction check from the stereo WAV data. Without array heading calibration this is only array-relative; set `HYDROPHONE_ARRAY_HEADING_DEG` to convert it into map bearings.
 
 For full processing from raw AIS/audio outputs through the final app:
 
 ```powershell
+$env:HYDROPHONE_MIC_SPACING_M = "0.75"
+# Optional, replace with the calibrated geographic heading of array angle 0:
+# $env:HYDROPHONE_ARRAY_HEADING_DEG = "0"
 powershell.exe -ExecutionPolicy Bypass -File scripts\run_full_processing_and_build_app.ps1
 ```

@@ -339,6 +339,14 @@ p {
   stroke-width: 4;
 }
 
+.radial-line {
+  opacity: 0.9;
+  stroke: var(--accent);
+  stroke-dasharray: 8 8;
+  stroke-linecap: round;
+  stroke-width: 3;
+}
+
 .marker {
   cursor: pointer;
   stroke: #ffffff;
@@ -430,6 +438,82 @@ p {
   padding-top: 16px;
 }
 
+.mini-title {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 12px 0 6px;
+  text-transform: uppercase;
+}
+
+.association-box {
+  background: #f7fafb;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 5px;
+  margin: 10px 0 16px;
+  padding: 10px;
+}
+
+.association-box b {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.association-box.ambiguous {
+  border-left-color: var(--hydro);
+}
+
+.association-box.direction-mismatch {
+  border-left-color: var(--hydro);
+}
+
+.association-box.likely-candidate {
+  border-left-color: var(--good);
+}
+
+.association-box.direction-supported {
+  border-left-color: var(--good);
+}
+
+.association-box.close-shared,
+.association-box.likely-close {
+  border-left-color: var(--accent);
+}
+
+.candidate-table {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.candidate-head,
+.candidate-row {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1.2fr) 52px 58px 68px;
+}
+
+.candidate-head {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.candidate-row span:first-child {
+  color: var(--ink);
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .profile-row {
   display: grid;
   gap: 9px;
@@ -448,6 +532,47 @@ p {
 .bar-fill {
   background: linear-gradient(90deg, var(--vessel), var(--accent));
   height: 100%;
+}
+
+.beam-card {
+  background: #f7fafb;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 10px 0 14px;
+  padding: 10px;
+}
+
+.beam-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.beam-grid div {
+  min-width: 0;
+}
+
+.beam-grid span {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+}
+
+.beam-grid b {
+  display: block;
+  font-size: 13px;
+  line-height: 1.25;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.beam-note {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 10px;
+  padding-top: 8px;
 }
 
 .waveform-card {
@@ -493,8 +618,15 @@ p {
   stroke-width: 2;
 }
 
+.waveform-loudest {
+  stroke: var(--accent);
+  stroke-dasharray: 4 4;
+  stroke-width: 2;
+}
+
 .waveform-label,
-.waveform-arrival-label {
+.waveform-arrival-label,
+.waveform-loudest-label {
   fill: var(--muted);
   font-size: 10px;
 }
@@ -504,12 +636,47 @@ p {
   font-weight: 700;
 }
 
+.waveform-loudest-label {
+  fill: #9b6b00;
+  font-weight: 700;
+}
+
 .waveform-meta {
   color: var(--muted);
   display: flex;
   font-size: 12px;
   gap: 12px;
   justify-content: space-between;
+}
+
+.sound-gradient-card {
+  margin: 10px 0 14px;
+}
+
+.sound-gradient {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  height: 28px;
+  overflow: hidden;
+  position: relative;
+}
+
+.sound-gradient-marker {
+  background: var(--hydro);
+  bottom: 0;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
+  position: absolute;
+  top: 0;
+  width: 2px;
+}
+
+.sound-gradient-peak {
+  background: var(--accent);
+  bottom: 0;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
+  position: absolute;
+  top: 0;
+  width: 2px;
 }
 
 .timeline {

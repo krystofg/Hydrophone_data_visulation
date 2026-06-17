@@ -35,6 +35,7 @@ OUTPUT_COLUMNS = [
     "source_time_utc",
     "event_time_utc",
     "source_distance_km",
+    "source_bearing_deg",
     "propagation_delay_seconds",
     "event_offset_seconds",
     "window_start_utc",
@@ -52,6 +53,15 @@ OUTPUT_COLUMNS = [
     "peak_dbfs",
     "crest_factor_db",
     "stereo_correlation",
+    "beam_delay_seconds",
+    "beam_angle_candidates_deg",
+    "beam_bearing_candidates_deg",
+    "beam_best_bearing_deg",
+    "beam_confidence",
+    "bearing_error_deg",
+    "beam_frequency_min_hz",
+    "beam_frequency_max_hz",
+    "beam_note",
     "captured",
     "capture_note",
 ]
@@ -99,6 +109,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sound-speed-m-s", type=float, default=1500.0)
     parser.add_argument("--block-seconds", type=float, default=5.0)
     parser.add_argument("--waveform-bins", type=int, default=120)
+    parser.add_argument("--skip-beamforming", action="store_true")
+    parser.add_argument("--beam-window-seconds", type=float, default=8.0)
+    parser.add_argument("--beam-fmin-hz", type=float, default=50.0)
+    parser.add_argument("--beam-fmax-hz", type=float, default=900.0)
+    parser.add_argument("--mic-spacing-m", type=float, default=0.75)
+    parser.add_argument(
+        "--array-heading-deg",
+        type=float,
+        default=None,
+        help="Geographic bearing of array angle 0. Leave unset for array-relative angles only.",
+    )
     parser.add_argument("--cache-files", type=int, default=8)
     return parser.parse_args()
 
@@ -219,6 +240,145 @@ def compute_waveform_summary(
     }
 
 
+def next_power_of_two(value: int) -> int:
+    return 1 << max(1, value - 1).bit_length()
+
+
+def angular_difference_deg(a: float, b: float) -> float:
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    lon_delta = math.radians(lon2 - lon1)
+    x = math.sin(lon_delta) * math.cos(lat2_rad)
+    y = (
+        math.cos(lat1_rad) * math.sin(lat2_rad)
+        - math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(lon_delta)
+    )
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def empty_beam_values() -> dict[str, str]:
+    return {
+        "beam_delay_seconds": "",
+        "beam_angle_candidates_deg": "[]",
+        "beam_bearing_candidates_deg": "[]",
+        "beam_best_bearing_deg": "",
+        "beam_confidence": "",
+        "bearing_error_deg": "",
+        "beam_frequency_min_hz": "",
+        "beam_frequency_max_hz": "",
+        "beam_note": "",
+    }
+
+
+def compute_beam_summary(
+    samples: np.ndarray,
+    sample_rate: int,
+    event_offset_seconds: float,
+    *,
+    sound_speed_m_s: float,
+    mic_spacing_m: float,
+    beam_window_seconds: float,
+    fmin_hz: float,
+    fmax_hz: float,
+    array_heading_deg: float | None,
+    source_bearing_deg: float | None,
+) -> dict[str, str]:
+    result = empty_beam_values()
+    result["beam_frequency_min_hz"] = f"{fmin_hz:.1f}"
+    result["beam_frequency_max_hz"] = f"{fmax_hz:.1f}"
+
+    if samples.ndim < 2 or samples.shape[1] < 2:
+        result["beam_note"] = "Beam direction requires at least two synchronized channels."
+        return result
+    if mic_spacing_m <= 0 or sound_speed_m_s <= 0:
+        result["beam_note"] = "Invalid microphone spacing or sound speed."
+        return result
+
+    half_window_frames = max(1, int(round(sample_rate * beam_window_seconds / 2.0)))
+    center_frame = int(round(event_offset_seconds * sample_rate))
+    center_frame = max(0, min(samples.shape[0], center_frame))
+    start_frame = max(0, center_frame - half_window_frames)
+    end_frame = min(samples.shape[0], center_frame + half_window_frames)
+    if end_frame - start_frame < sample_rate * 0.25:
+        result["beam_note"] = "Not enough audio around AIS arrival for beam direction."
+        return result
+
+    stereo = samples[start_frame:end_frame, :2].astype(np.float64)
+    left = stereo[:, 0] - float(np.mean(stereo[:, 0]))
+    right = stereo[:, 1] - float(np.mean(stereo[:, 1]))
+    if not np.any(left) or not np.any(right):
+        result["beam_note"] = "Silent stereo slice."
+        return result
+
+    window = np.hanning(left.size)
+    n_fft = next_power_of_two(left.size * 2)
+    left_fft = np.fft.rfft(left * window, n=n_fft)
+    right_fft = np.fft.rfft(right * window, n=n_fft)
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sample_rate)
+    usable_fmax = min(fmax_hz, sound_speed_m_s / (2.0 * mic_spacing_m) * 0.95)
+    mask = (freqs >= fmin_hz) & (freqs <= usable_fmax)
+    if not np.any(mask):
+        result["beam_note"] = "No usable beamforming frequencies after anti-alias limit."
+        return result
+
+    cross_spectrum = left_fft * np.conj(right_fft)
+    cross_spectrum[~mask] = 0.0
+    cross_spectrum /= np.maximum(np.abs(cross_spectrum), 1e-12)
+    correlation = np.fft.irfft(cross_spectrum, n=n_fft)
+
+    max_tau = mic_spacing_m / sound_speed_m_s
+    max_shift = max(1, int(round(max_tau * sample_rate)))
+    centered = np.concatenate((correlation[-max_shift:], correlation[: max_shift + 1]))
+    lags = np.arange(-max_shift, max_shift + 1)
+    magnitudes = np.abs(centered)
+    peak_index = int(np.argmax(magnitudes))
+    lag_samples = int(lags[peak_index])
+    delay_seconds = lag_samples / sample_rate
+    peak = float(magnitudes[peak_index])
+    median = float(np.median(magnitudes))
+    confidence = max(0.0, min(1.0, (peak - median) / (peak + 1e-12)))
+
+    sin_angle = max(-1.0, min(1.0, delay_seconds / max_tau))
+    principal_angle = math.degrees(math.asin(sin_angle))
+    angle_candidates = [
+        principal_angle % 360.0,
+        (180.0 - principal_angle) % 360.0,
+    ]
+    angle_candidates = sorted({round(angle, 3) for angle in angle_candidates})
+
+    result["beam_delay_seconds"] = f"{delay_seconds:.7f}"
+    result["beam_angle_candidates_deg"] = json.dumps(angle_candidates, separators=(",", ":"))
+    result["beam_confidence"] = f"{confidence:.3f}"
+    result["beam_frequency_max_hz"] = f"{usable_fmax:.1f}"
+
+    notes = ["Two-channel beamforming has mirror ambiguity."]
+    if usable_fmax < fmax_hz:
+        notes.append(f"Beam fmax limited to {usable_fmax:.1f} Hz to reduce spatial aliasing.")
+
+    if array_heading_deg is None:
+        notes.append("Array heading is not set, so angles are array-relative.")
+    else:
+        bearing_candidates = [((angle + array_heading_deg) % 360.0) for angle in angle_candidates]
+        result["beam_bearing_candidates_deg"] = json.dumps(
+            [round(bearing, 3) for bearing in bearing_candidates],
+            separators=(",", ":"),
+        )
+        if source_bearing_deg is not None:
+            best_bearing = min(
+                bearing_candidates,
+                key=lambda bearing: angular_difference_deg(bearing, source_bearing_deg),
+            )
+            result["beam_best_bearing_deg"] = f"{best_bearing:.3f}"
+            result["bearing_error_deg"] = f"{angular_difference_deg(best_bearing, source_bearing_deg):.3f}"
+
+    result["beam_note"] = " ".join(notes)
+    return result
+
+
 def compute_features(
     samples: np.ndarray,
     sample_rate: int,
@@ -287,6 +447,7 @@ def empty_feature_values() -> dict[str, str]:
         "waveform_rms_dbfs": "[]",
         "waveform_peak_dbfs": "[]",
     }
+    values.update(empty_beam_values())
     for band in DEFAULT_BANDS:
         values[band_column(*band)] = ""
     return values
@@ -307,6 +468,7 @@ def profile_row(
     source_time: dt.datetime,
     event_time: dt.datetime,
     source_distance_km: float | None,
+    source_bearing_deg: float | None,
     propagation_delay_seconds: float,
     window_start: dt.datetime,
     window_end: dt.datetime,
@@ -314,6 +476,13 @@ def profile_row(
     cache: RecordingCache,
     block_seconds: float,
     waveform_bins: int,
+    skip_beamforming: bool,
+    beam_window_seconds: float,
+    beam_fmin_hz: float,
+    beam_fmax_hz: float,
+    mic_spacing_m: float,
+    sound_speed_m_s: float,
+    array_heading_deg: float | None,
 ) -> dict[str, str]:
     samples, sample_rate, files, audio_offset_seconds = extract_audio_window(
         recordings=recordings,
@@ -328,6 +497,7 @@ def profile_row(
         "source_time_utc": iso(source_time),
         "event_time_utc": iso(event_time),
         "source_distance_km": f"{source_distance_km:.4f}" if source_distance_km is not None else "",
+        "source_bearing_deg": f"{source_bearing_deg:.3f}" if source_bearing_deg is not None else "",
         "propagation_delay_seconds": f"{propagation_delay_seconds:.3f}",
         "event_offset_seconds": f"{(event_time - window_start).total_seconds():.3f}",
         "window_start_utc": iso(window_start),
@@ -340,6 +510,7 @@ def profile_row(
         "captured": "false",
         "capture_note": "No hydrophone recording overlaps this event window.",
     }
+    row.update(empty_beam_values())
     if samples is None or sample_rate is None or samples.size == 0:
         row.update(empty_feature_values())
         return row
@@ -350,6 +521,21 @@ def profile_row(
     row["capture_note"] = "Hydrophone audio was available for this event window."
     row.update(compute_waveform_summary(samples, sample_rate, audio_offset_seconds, waveform_bins))
     row.update(compute_features(samples, sample_rate, block_seconds))
+    if not skip_beamforming:
+        row.update(
+            compute_beam_summary(
+                samples,
+                sample_rate,
+                event_offset_seconds=(event_time - window_start).total_seconds() - audio_offset_seconds,
+                sound_speed_m_s=sound_speed_m_s,
+                mic_spacing_m=mic_spacing_m,
+                beam_window_seconds=beam_window_seconds,
+                fmin_hz=beam_fmin_hz,
+                fmax_hz=beam_fmax_hz,
+                array_heading_deg=array_heading_deg,
+                source_bearing_deg=source_bearing_deg,
+            )
+        )
     return row
 
 
@@ -363,6 +549,9 @@ def load_events(
     sound_speed_m_s: float,
 ):
     data = json.loads(app_data_path.read_text(encoding="utf-8"))
+    hydrophone = data.get("hydrophone", {})
+    hydro_lat = parse_float(hydrophone.get("latitude"))
+    hydro_lon = parse_float(hydrophone.get("longitude"))
     half_vessel = dt.timedelta(seconds=vessel_window_seconds / 2)
     events: list[dict[str, object]] = []
 
@@ -390,9 +579,11 @@ def load_events(
             )
             source_time = safe_parse_datetime(best_point.get("timestamp"))
             source_distance_km = parse_float(best_point.get("distanceKm"))
+            source_bearing_deg = parse_float(best_point.get("bearingDeg"))
         else:
             source_time = safe_parse_datetime(vessel.get("closestTimestamp"))
             source_distance_km = parse_float(vessel.get("closestDistanceKm"))
+            source_bearing_deg = parse_float(vessel.get("closestBearingDeg"))
         if source_time is None:
             continue
         propagation_delay_seconds = ((source_distance_km or 0.0) * 1000.0) / sound_speed_m_s
@@ -405,6 +596,7 @@ def load_events(
                 "source_time": source_time,
                 "event_time": event_time,
                 "source_distance_km": source_distance_km,
+                "source_bearing_deg": source_bearing_deg,
                 "propagation_delay_seconds": propagation_delay_seconds,
                 "window_start": event_time - half_vessel,
                 "window_end": event_time + half_vessel,
@@ -420,6 +612,13 @@ def load_events(
         station = str(event.get("station") or event.get("id") or event.get("fileName") or "CTD")
         midpoint = start + (end - start) / 2
         source_distance_km = parse_float(event.get("distanceToHydrophoneKm"))
+        event_lat = parse_float(event.get("latitude"))
+        event_lon = parse_float(event.get("longitude"))
+        source_bearing_deg = (
+            bearing_deg(hydro_lat, hydro_lon, event_lat, event_lon)
+            if hydro_lat is not None and hydro_lon is not None and event_lat is not None and event_lon is not None
+            else None
+        )
         propagation_delay_seconds = ((source_distance_km or 0.0) * 1000.0) / sound_speed_m_s
         arrival_midpoint = midpoint + dt.timedelta(seconds=propagation_delay_seconds)
         events.append(
@@ -430,6 +629,7 @@ def load_events(
                 "source_time": midpoint,
                 "event_time": arrival_midpoint,
                 "source_distance_km": source_distance_km,
+                "source_bearing_deg": source_bearing_deg,
                 "propagation_delay_seconds": propagation_delay_seconds,
                 "window_start": start + dt.timedelta(seconds=propagation_delay_seconds) - ctd_padding,
                 "window_end": end + dt.timedelta(seconds=propagation_delay_seconds) + ctd_padding,
@@ -466,6 +666,7 @@ def main() -> None:
                 source_time=event["source_time"],
                 event_time=event["event_time"],
                 source_distance_km=event["source_distance_km"],
+                source_bearing_deg=event["source_bearing_deg"],
                 propagation_delay_seconds=event["propagation_delay_seconds"],
                 window_start=event["window_start"],
                 window_end=event["window_end"],
@@ -473,6 +674,13 @@ def main() -> None:
                 cache=cache,
                 block_seconds=args.block_seconds,
                 waveform_bins=args.waveform_bins,
+                skip_beamforming=args.skip_beamforming,
+                beam_window_seconds=args.beam_window_seconds,
+                beam_fmin_hz=args.beam_fmin_hz,
+                beam_fmax_hz=args.beam_fmax_hz,
+                mic_spacing_m=args.mic_spacing_m,
+                sound_speed_m_s=args.sound_speed_m_s,
+                array_heading_deg=args.array_heading_deg,
             )
             writer.writerow(row)
             captured += row["captured"] == "true"

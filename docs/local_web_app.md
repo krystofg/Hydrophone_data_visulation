@@ -16,6 +16,20 @@ The JSON is generated from processed outputs, not raw 30 GB recordings or raw AI
 The clickable build also creates `outputs/processing/event_audio_profiles.csv`, which contains separate acoustic windows for selected vessels and CTD events.
 Vessel acoustic windows are centered on estimated hydrophone arrival time, using AIS source time plus `distance / sound_speed`. The default sound speed is 1500 m/s.
 Each captured profile also includes a compact audio envelope for the selected event window, with the estimated vessel or CTD arrival time marked in the graph.
+For stereo WAV files, the event profile step also computes a two-channel time-difference direction check. This is not source separation; it is a consistency test between the AIS/CTD bearing and the strongest left/right arrival delay in the event audio window.
+
+Useful optional settings:
+
+```powershell
+$env:HYDROPHONE_MIC_SPACING_M = "0.75"
+# Optional, only after calibration:
+# $env:HYDROPHONE_ARRAY_HEADING_DEG = "0"
+# Optional frequency band for the direction check:
+# $env:HYDROPHONE_BEAM_FMIN_HZ = "50"
+# $env:HYDROPHONE_BEAM_FMAX_HZ = "900"
+```
+
+If `HYDROPHONE_ARRAY_HEADING_DEG` is not set, the app shows array-relative angle candidates only. With a calibrated heading, the app also shows beam bearing candidates, best beam/AIS match, bearing error, and dashed beam rays on the map.
 
 ## Build clickable app
 
@@ -27,9 +41,10 @@ Open the generated file directly:
 
 - `web/hydrophone_app.html`
 
-The standalone file embeds the compact data JSON, CSS, and JavaScript. It uses Leaflet with OpenStreetMap tiles for the real basemap, so the basemap needs internet access. If the map library is unavailable, the app falls back to a plain local SVG layer.
+The standalone file embeds the compact data JSON, CSS, and JavaScript. It uses Leaflet with CARTO basemap tiles first and Esri tiles as a fallback, so the real basemap needs internet access. If the map library is unavailable, the app falls back to a plain local SVG layer.
 The final map only shows vessels with a captured per-event acoustic profile. CTD events stay visible so you can compare casts with captured or missing audio windows.
-The default vessel view shows the strongest acoustic candidates. Use the `All signals` toggle to show every vessel with a captured profile. AIS track lines are drawn only for the selected vessel.
+The default vessel view shows likely isolated AIS/audio candidates within 2.5 km. Use the `All signals` toggle to show every vessel with a captured profile, including ambiguous shared audio windows. AIS track lines, radial bearing lines, distance rings, and calibrated beam rays are drawn only for the selected vessel or CTD cast.
+CTD detection is based on the captured event audio profile, not only on raw recording time overlap.
 
 ## Full rebuild from raw processed data
 

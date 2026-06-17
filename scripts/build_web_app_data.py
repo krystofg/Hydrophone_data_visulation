@@ -234,6 +234,8 @@ def profile_from_row(row: dict[str, str]) -> dict[str, object]:
     waveform_times = parse_float_list(row.get("waveform_times_seconds"))
     waveform_rms = parse_float_list(row.get("waveform_rms_dbfs"))
     waveform_peak = parse_float_list(row.get("waveform_peak_dbfs"))
+    beam_angle_candidates = parse_float_list(row.get("beam_angle_candidates_deg"))
+    beam_bearing_candidates = parse_float_list(row.get("beam_bearing_candidates_deg"))
     return {
         "fileName": row.get("file_name") or row.get("recording_files", ""),
         "sourceTimeUtc": row.get("source_time_utc", ""),
@@ -242,6 +244,7 @@ def profile_from_row(row: dict[str, str]) -> dict[str, object]:
         "eventTimeUtc": row.get("event_time_utc", ""),
         "eventOffsetSeconds": parse_float(row.get("event_offset_seconds")),
         "sourceDistanceKm": parse_float(row.get("source_distance_km")),
+        "sourceBearingDeg": parse_float(row.get("source_bearing_deg")),
         "propagationDelaySeconds": parse_float(row.get("propagation_delay_seconds")),
         "rmsDbfsMean": parse_float(row.get("rms_dbfs_mean")),
         "peakDbfs": parse_float(row.get("peak_dbfs")),
@@ -260,6 +263,17 @@ def profile_from_row(row: dict[str, str]) -> dict[str, object]:
             "timesSeconds": waveform_times,
             "rmsDbfs": waveform_rms,
             "peakDbfs": waveform_peak,
+        },
+        "beam": {
+            "delaySeconds": parse_float(row.get("beam_delay_seconds")),
+            "angleCandidatesDeg": beam_angle_candidates,
+            "bearingCandidatesDeg": beam_bearing_candidates,
+            "bestBearingDeg": parse_float(row.get("beam_best_bearing_deg")),
+            "confidence": parse_float(row.get("beam_confidence")),
+            "bearingErrorDeg": parse_float(row.get("bearing_error_deg")),
+            "frequencyMinHz": parse_float(row.get("beam_frequency_min_hz")),
+            "frequencyMaxHz": parse_float(row.get("beam_frequency_max_hz")),
+            "note": row.get("beam_note", ""),
         },
         "nearbyVesselCount": parse_float(row.get("nearby_vessel_count")),
         "closestShipId": row.get("closest_ship_id", ""),
@@ -436,6 +450,7 @@ def read_ctd_events(path: Path | None, event_profiles: dict[str, dict[str, dict[
                     "salinityMaxPsu": parse_float(row.get("salinity_max_psu")),
                 }
             event["audio"] = event_profiles.get("ctd", {}).get(str(event_id))
+            event["detectedByHydrophone"] = bool(event["audio"] and event["audio"].get("captured") is True)
             events.append(event)
     events.sort(key=lambda event: str(event.get("startUtc", "")))
     return events

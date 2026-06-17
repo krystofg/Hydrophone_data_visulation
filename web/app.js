@@ -1,15 +1,31 @@
 const DATA_URL = "data/app_data.json";
+const MAP_TILE_PROVIDERS = [
+  {
+    name: "CARTO Voyager",
+    url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
+  },
+  {
+    name: "Esri World Street Map",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution: "Tiles &copy; Esri"
+  }
+];
 
 const state = {
   data: null,
   mode: "vessels",
   signalMode: "strongest",
-  strongestLimit: 80,
+  strongestLimit: 40,
+  strongestMaxDistanceKm: 2.5,
+  closeCandidateDistanceKm: 0.35,
   selectedType: "vessel",
   selectedId: null,
   query: "",
   leafletMap: null,
   leafletLayers: null,
+  tileLayer: null,
+  tileProviderIndex: 0,
   mapNeedsFit: true
 };
 
@@ -54,18 +70,57 @@ function finiteNumber(value, fallback = null) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function vesselEventDistanceKm(vessel) {
+  return finiteNumber(vessel.audio?.sourceDistanceKm, finiteNumber(vessel.closestDistanceKm, 999));
+}
+
+function ctdDetected(event) {
+  if (event.detectedByHydrophone !== undefined) return event.detectedByHydrophone === true;
+  return event.audio?.captured === true;
+}
+
+function beamErrorDeg(audio) {
+  return finiteNumber(audio?.beam?.bearingErrorDeg);
+}
+
+function beamConfidence(audio) {
+  return finiteNumber(audio?.beam?.confidence);
+}
+
+function beamStronglyDisagrees(audio) {
+  const error = beamErrorDeg(audio);
+  const confidence = beamConfidence(audio);
+  return error !== null && confidence !== null && confidence >= 0.12 && error > 75;
+}
+
+function beamSupportsSource(audio) {
+  const error = beamErrorDeg(audio);
+  const confidence = beamConfidence(audio);
+  return error !== null && confidence !== null && confidence >= 0.12 && error <= 35;
+}
+
 function acousticScore(vessel) {
   const audio = vessel.audio || {};
   const rms = finiteNumber(audio.rmsDbfsMean, -120);
   const peak = finiteNumber(audio.peakDbfs, -120);
-  const distance = finiteNumber(audio.sourceDistanceKm, finiteNumber(vessel.closestDistanceKm, 30));
+  const distance = vesselEventDistanceKm(vessel);
   const coverage = finiteNumber(audio.coverageSeconds, 0);
-  const distancePenalty = Math.log2(Math.max(1, distance + 1)) * 2.5;
-  return rms + Math.max(-12, peak) * 0.08 + Math.min(coverage, 60) * 0.03 - distancePenalty;
+  const distancePenalty = Math.max(0, distance) * 5.5;
+  const directionBonus = beamSupportsSource(audio) ? 2 : 0;
+  const directionPenalty = beamStronglyDisagrees(audio) ? 8 : 0;
+  return rms + Math.max(-30, peak) * 0.12 + Math.min(coverage, 60) * 0.03 - distancePenalty + directionBonus - directionPenalty;
 }
 
 function strongestVessels(vessels) {
+  const isolated = vessels
+    .filter((vessel) => vesselEventDistanceKm(vessel) <= state.strongestMaxDistanceKm)
+    .filter((vessel) => isDefaultLikelyCandidate(vessel))
+    .slice()
+    .sort((a, b) => acousticScore(b) - acousticScore(a))
+    .slice(0, state.strongestLimit);
+  if (isolated.length) return isolated;
   return vessels
+    .filter((vessel) => vesselEventDistanceKm(vessel) <= 0.5)
     .slice()
     .sort((a, b) => acousticScore(b) - acousticScore(a))
     .slice(0, state.strongestLimit);
@@ -103,6 +158,180 @@ function filteredVessels() {
   return vessels.slice().sort((a, b) => acousticScore(b) - acousticScore(a));
 }
 
+function parseMillis(value) {
+  const millis = Date.parse(value || "");
+  return Number.isFinite(millis) ? millis : null;
+}
+
+function windowsOverlapSeconds(a, b) {
+  const aStart = parseMillis(a?.startUtc);
+  const aEnd = parseMillis(a?.endUtc);
+  const bStart = parseMillis(b?.startUtc);
+  const bEnd = parseMillis(b?.endUtc);
+  if (aStart === null || aEnd === null || bStart === null || bEnd === null) return 0;
+  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart)) / 1000;
+}
+
+function audioRows(audio) {
+  const waveform = audio?.waveform || {};
+  const times = Array.isArray(waveform.timesSeconds) ? waveform.timesSeconds.map(Number) : [];
+  const rms = Array.isArray(waveform.rmsDbfs) ? waveform.rmsDbfs.map(Number) : [];
+  return times.map((time, index) => ({ time, rms: rms[index] }))
+    .filter((row) => Number.isFinite(row.time) && Number.isFinite(row.rms));
+}
+
+function loudestOffsetSeconds(audio) {
+  const rows = audioRows(audio);
+  if (!rows.length) return null;
+  return rows.reduce((best, row) => (row.rms > best.rms ? row : best), rows[0]).time;
+}
+
+function loudestArrivalDeltaSeconds(audio) {
+  const loudest = loudestOffsetSeconds(audio);
+  const eventOffset = finiteNumber(audio?.eventOffsetSeconds);
+  if (loudest === null || eventOffset === null) return null;
+  return Math.abs(loudest - eventOffset);
+}
+
+function sameAudioWindowCandidates(vessel) {
+  const audio = vessel.audio || {};
+  const selectedEvent = parseMillis(audio.eventTimeUtc);
+  return state.data.vessels
+    .filter((candidate) => candidate.id !== vessel.id && candidate.audio?.captured === true)
+    .map((candidate) => {
+      const candidateEvent = parseMillis(candidate.audio?.eventTimeUtc);
+      const eventDelta = selectedEvent !== null && candidateEvent !== null
+        ? Math.abs(candidateEvent - selectedEvent) / 1000
+        : null;
+      return {
+        vessel: candidate,
+        windowOverlap: windowsOverlapSeconds(audio, candidate.audio),
+        eventDelta,
+        distanceKm: vesselEventDistanceKm(candidate)
+      };
+    })
+    .filter((candidate) => candidate.windowOverlap > 0 || (candidate.eventDelta !== null && candidate.eventDelta <= 60))
+    .sort((a, b) => {
+      const overlapDelta = b.windowOverlap - a.windowOverlap;
+      if (Math.abs(overlapDelta) > 0.001) return overlapDelta;
+      return (a.eventDelta ?? 9999) - (b.eventDelta ?? 9999);
+    });
+}
+
+function sharedWindowSeconds(vessel) {
+  const candidates = sameAudioWindowCandidates(vessel);
+  return candidates.length ? candidates[0].windowOverlap : 0;
+}
+
+function isIsolatedCandidate(vessel) {
+  const audio = vessel.audio || {};
+  const distance = vesselEventDistanceKm(vessel);
+  const loudestDelta = loudestArrivalDeltaSeconds(audio);
+  const overlap = sharedWindowSeconds(vessel);
+  const duration = durationSeconds(audio.startUtc, audio.endUtc) || finiteNumber(audio.coverageSeconds, 45) || 45;
+  const hasSharedAudioWindow = overlap >= Math.min(15, duration * 0.35);
+  const peak = finiteNumber(audio.peakDbfs, -120);
+
+  return (
+    distance <= state.strongestMaxDistanceKm &&
+    !hasSharedAudioWindow &&
+    peak > -35 &&
+    (loudestDelta === null || loudestDelta <= 10)
+  );
+}
+
+function isCloseCandidate(vessel) {
+  const peak = finiteNumber(vessel.audio?.peakDbfs, -120);
+  return vesselEventDistanceKm(vessel) <= state.closeCandidateDistanceKm && peak > -45;
+}
+
+function isDefaultLikelyCandidate(vessel) {
+  return (isCloseCandidate(vessel) || isIsolatedCandidate(vessel)) && !beamStronglyDisagrees(vessel.audio);
+}
+
+function associationStatus(vessel) {
+  const distance = vesselEventDistanceKm(vessel);
+  const competitors = sameAudioWindowCandidates(vessel);
+  const loudestDelta = loudestArrivalDeltaSeconds(vessel.audio);
+  if (beamStronglyDisagrees(vessel.audio)) return "Direction mismatch";
+  if (beamSupportsSource(vessel.audio) && distance <= 2.5 && competitors.length === 0) return "Direction supported";
+  if (isCloseCandidate(vessel)) return competitors.length ? "Close shared candidate" : "Likely close candidate";
+  if (!isIsolatedCandidate(vessel)) return "Ambiguous";
+  if (distance <= 1.5 && (loudestDelta === null || loudestDelta <= 8) && competitors.length === 0) return "Likely candidate";
+  if (distance > 5 || competitors.length >= 1) return "Ambiguous";
+  return "Candidate";
+}
+
+function formatDegreeList(values) {
+  if (!Array.isArray(values)) return "-";
+  const degrees = values
+    .map(Number)
+    .filter((value) => Number.isFinite(value))
+    .map((value) => `${value.toFixed(0)} deg`);
+  return degrees.length ? degrees.join(" / ") : "-";
+}
+
+function beamDirectionHtml(audio) {
+  const beam = audio?.beam || {};
+  const angleCandidates = Array.isArray(beam.angleCandidatesDeg) ? beam.angleCandidatesDeg : [];
+  const bearingCandidates = Array.isArray(beam.bearingCandidatesDeg) ? beam.bearingCandidatesDeg : [];
+  const hasBeam = angleCandidates.length || beam.note || beam.delaySeconds !== null;
+  if (!hasBeam) return "";
+
+  const bearingHelp = bearingCandidates.length
+    ? formatDegreeList(bearingCandidates)
+    : "Set array heading to convert relative angles";
+  const rows = [
+    ["AIS bearing", fmt(audio.sourceBearingDeg, 0, " deg")],
+    ["Array angles", formatDegreeList(angleCandidates)],
+    ["Beam bearings", bearingHelp],
+    ["Best match", fmt(beam.bestBearingDeg, 0, " deg")],
+    ["Bearing error", fmt(beam.bearingErrorDeg, 1, " deg")],
+    ["Confidence", fmt(beam.confidence, 2)],
+    ["Band", `${fmt(beam.frequencyMinHz, 0, " Hz")} - ${fmt(beam.frequencyMaxHz, 0, " Hz")}`]
+  ];
+
+  return `
+    <div class="beam-card">
+      <div class="beam-grid">
+        ${rows.map(([label, value]) => `
+          <div>
+            <span>${label}</span>
+            <b>${value}</b>
+          </div>
+        `).join("")}
+      </div>
+      ${beam.note ? `<div class="beam-note">${beam.note}</div>` : ""}
+    </div>
+  `;
+}
+
+function associationContextHtml(vessel) {
+  const competitors = sameAudioWindowCandidates(vessel);
+  const loudestDelta = loudestArrivalDeltaSeconds(vessel.audio);
+  const beamError = beamErrorDeg(vessel.audio);
+  const beamConfidenceValue = beamConfidence(vessel.audio);
+  const rows = competitors.slice(0, 5).map((item) => `
+    <div class="candidate-row">
+      <span>${clean(item.vessel.name)}</span>
+      <span>${fmt(item.eventDelta, 1, " s")}</span>
+      <span>${fmt(item.distanceKm, 2, " km")}</span>
+      <span>${fmt(item.vessel.audio?.rmsDbfsMean, 1, " dBFS")}</span>
+    </div>
+  `).join("");
+  return `
+    <div class="association-box ${associationStatus(vessel).toLowerCase().replace(" ", "-")}">
+      <b>${associationStatus(vessel)}</b>
+      <span>Single-hydrophone AIS/audio association, not source-separated proof.</span>
+      <span>Shared audio overlap: ${fmt(sharedWindowSeconds(vessel), 1, " s")}. Repeated waveforms mean ambiguous evidence.</span>
+      <span>Peak vs AIS arrival delta: ${fmt(loudestDelta, 1, " s")}. Smaller is better; large means the loudest sound did not occur at the estimated arrival.</span>
+      <span>Beam/AIS bearing error: ${fmt(beamError, 1, " deg")} at confidence ${fmt(beamConfidenceValue, 2)}.</span>
+      <span>${competitors.length} other captured vessel candidates overlap this acoustic window or arrival time.</span>
+      ${rows ? `<div class="candidate-table"><div class="candidate-head"><span>Candidate</span><span>dt</span><span>dist</span><span>RMS</span></div>${rows}</div>` : ""}
+    </div>
+  `;
+}
+
 function filteredCtd() {
   return state.data.ctdEvents.filter((event) => modeAllows("ctd") && matchesQuery(event, ["station", "fileName", "startUtc"]));
 }
@@ -115,7 +344,13 @@ function renderStats() {
     ["Event audio", metadata.eventAudioProfileCount || metadata.audioProfileCount]
   ].map(([label, value]) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`).join("");
   const source = metadata.sources.aisCsv || "no AIS source";
-  const signalText = state.signalMode === "strongest" ? `showing strongest ${filteredVessels().length}` : "showing all vessel signals";
+  let signalText = `${filteredCtd().length} CTD casts`;
+  if (modeAllows("vessels")) {
+    const vesselCount = filteredVessels().length;
+    signalText = state.signalMode === "strongest"
+      ? `${vesselCount} isolated vessel candidates within ${state.strongestMaxDistanceKm} km`
+      : `${vesselCount} captured vessel signals`;
+  }
   sourceLine.textContent = `${source} - ${signalText}`;
 }
 
@@ -141,7 +376,7 @@ function renderList() {
       <button class="entity-item ctd ${state.selectedType === "ctd" && state.selectedId === String(event.id) ? "is-selected" : ""}" data-type="ctd" data-id="${event.id}">
         <span>
           <span class="entity-name">CTD ${clean(event.station || event.id)}</span>
-          <span class="entity-meta">${clean(event.startUtc)} - ${event.recordedByHydrophone ? "recorded" : "outside audio"}</span>
+          <span class="entity-meta">${clean(event.startUtc)} - ${ctdDetected(event) ? "detected" : "not detected"}</span>
         </span>
         <span class="distance-pill">${fmt(event.distanceToHydrophoneKm, 2, " km")}</span>
       </button>
@@ -207,12 +442,32 @@ function initializeLeafletMap() {
     zoomControl: true,
     attributionControl: true
   });
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors"
-  }).addTo(state.leafletMap);
+  setTileProvider(0);
   state.leafletLayers = L.layerGroup().addTo(state.leafletMap);
   return true;
+}
+
+function setTileProvider(index) {
+  if (!state.leafletMap || !window.L) return;
+  const provider = MAP_TILE_PROVIDERS[index];
+  if (!provider) return;
+  if (state.tileLayer) {
+    state.leafletMap.removeLayer(state.tileLayer);
+  }
+  state.tileProviderIndex = index;
+  state.tileLayer = L.tileLayer(provider.url, {
+    maxZoom: 19,
+    subdomains: "abcd",
+    attribution: provider.attribution,
+    crossOrigin: true
+  });
+  state.tileLayer.on("tileerror", () => {
+    const nextIndex = state.tileProviderIndex + 1;
+    if (MAP_TILE_PROVIDERS[nextIndex]) {
+      setTileProvider(nextIndex);
+    }
+  });
+  state.tileLayer.addTo(state.leafletMap);
 }
 
 function leafletStyle(kind, selected = false, muted = false) {
@@ -243,6 +498,74 @@ function fitLeafletMap(vessels, ctdEvents) {
   state.mapNeedsFit = false;
 }
 
+function selectedCtdEvent() {
+  return state.data.ctdEvents.find((event) => String(event.id) === String(state.selectedId));
+}
+
+function addLeafletRadialGeometry(targetLatLng, distanceKm, color) {
+  const hydro = state.data.hydrophone;
+  const hydroLatLng = [hydro.latitude, hydro.longitude];
+  if (!targetLatLng || !Number.isFinite(targetLatLng[0]) || !Number.isFinite(targetLatLng[1])) return;
+  L.circle(hydroLatLng, {
+    radius: Math.max(1, distanceKm) * 1000,
+    color,
+    dashArray: "8 8",
+    fillColor: color,
+    fillOpacity: 0.045,
+    opacity: 0.75,
+    weight: 2
+  }).addTo(state.leafletLayers);
+  L.polyline([hydroLatLng, targetLatLng], {
+    color,
+    dashArray: "8 8",
+    opacity: 0.9,
+    weight: 2
+  }).addTo(state.leafletLayers);
+}
+
+function destinationLatLng(lat, lon, bearingDeg, distanceKm) {
+  const radiusKm = 6371.0088;
+  const angularDistance = distanceKm / radiusKm;
+  const bearing = (bearingDeg * Math.PI) / 180;
+  const lat1 = (lat * Math.PI) / 180;
+  const lon1 = (lon * Math.PI) / 180;
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angularDistance) +
+    Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing)
+  );
+  const lon2 = lon1 + Math.atan2(
+    Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+    Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2)
+  );
+  return [(lat2 * 180) / Math.PI, (((lon2 * 180) / Math.PI + 540) % 360) - 180];
+}
+
+function beamBearingCandidates(audio) {
+  const candidates = audio?.beam?.bearingCandidatesDeg;
+  if (Array.isArray(candidates) && candidates.length) {
+    return candidates.map(Number).filter((value) => Number.isFinite(value));
+  }
+  const best = finiteNumber(audio?.beam?.bestBearingDeg);
+  return best === null ? [] : [best];
+}
+
+function addLeafletBeamGeometry(audio, fallbackDistanceKm) {
+  const bearings = beamBearingCandidates(audio);
+  if (!bearings.length) return;
+  const hydro = state.data.hydrophone;
+  const hydroLatLng = [hydro.latitude, hydro.longitude];
+  const distanceKm = Math.max(0.5, finiteNumber(audio?.sourceDistanceKm, fallbackDistanceKm) || fallbackDistanceKm || 1);
+  for (const bearing of bearings) {
+    const end = destinationLatLng(hydro.latitude, hydro.longitude, bearing, distanceKm);
+    L.polyline([hydroLatLng, end], {
+      color: "#c53b2c",
+      dashArray: "3 7",
+      opacity: 0.9,
+      weight: 2
+    }).bindTooltip(`Beam ${fmt(bearing, 0, " deg")}`).addTo(state.leafletLayers);
+  }
+}
+
 function renderLeafletMap() {
   if (!initializeLeafletMap()) return false;
   const vessels = filteredVessels();
@@ -251,6 +574,8 @@ function renderLeafletMap() {
 
   const selected = selectedVessel();
   if (state.selectedType === "vessel" && selected && modeAllows("vessels")) {
+    addLeafletRadialGeometry(vesselLatLng(selected), vesselEventDistanceKm(selected), "#d59c22");
+    addLeafletBeamGeometry(selected.audio, vesselEventDistanceKm(selected));
     const selectedTrack = selected.track
       .map((point) => [Number(point.latitude), Number(point.longitude)])
       .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
@@ -263,6 +588,12 @@ function renderLeafletMap() {
         lineJoin: "round"
       }).addTo(state.leafletLayers);
     }
+  }
+
+  const selectedCtd = selectedCtdEvent();
+  if (state.selectedType === "ctd" && selectedCtd && modeAllows("ctd")) {
+    addLeafletRadialGeometry(ctdLatLng(selectedCtd), finiteNumber(selectedCtd.distanceToHydrophoneKm, 1), "#8060b2");
+    addLeafletBeamGeometry(selectedCtd.audio, finiteNumber(selectedCtd.distanceToHydrophoneKm, 1));
   }
 
   if (modeAllows("vessels")) {
@@ -285,7 +616,7 @@ function renderLeafletMap() {
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const selectedMarker = state.selectedType === "ctd" && state.selectedId === String(event.id);
       const marker = L.circleMarker([lat, lon], {
-        ...leafletStyle("ctd", selectedMarker, !event.recordedByHydrophone),
+        ...leafletStyle("ctd", selectedMarker, !ctdDetected(event)),
         radius: ctdRadius(event)
       }).addTo(state.leafletLayers);
       marker.bindTooltip(`CTD ${event.station || event.id}`);
@@ -310,6 +641,19 @@ function renderFallbackMap() {
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
   renderBasemap();
+
+  if (state.selectedType === "vessel" && modeAllows("vessels")) {
+    const vessel = selectedVessel();
+    if (vessel) {
+      addFallbackRadialGeometry(vessel.closestLatitude, vessel.closestLongitude);
+    }
+  }
+  if (state.selectedType === "ctd" && modeAllows("ctd")) {
+    const event = selectedCtdEvent();
+    if (event) {
+      addFallbackRadialGeometry(event.latitude, event.longitude);
+    }
+  }
 
   if (state.selectedType === "vessel" && modeAllows("vessels")) {
     const vessel = selectedVessel();
@@ -380,6 +724,20 @@ function renderMap() {
   renderFallbackMap();
 }
 
+function addFallbackRadialGeometry(lat, lon) {
+  const hydro = state.data.hydrophone;
+  const start = project(hydro.latitude, hydro.longitude);
+  const end = project(Number(lat), Number(lon));
+  if (!Number.isFinite(end.x) || !Number.isFinite(end.y)) return;
+  svg.appendChild(svgElement("line", {
+    class: "radial-line",
+    x1: start.x,
+    y1: start.y,
+    x2: end.x,
+    y2: end.y
+  }));
+}
+
 function selectedVessel() {
   return state.data.vessels.find((vessel) => vessel.id === state.selectedId) || state.data.vessels[0];
 }
@@ -427,6 +785,7 @@ function audioWaveformHtml(audio) {
     .join(" ");
   const markerX = xForTime(markerTime).toFixed(1);
   const loudest = rows.reduce((best, row) => (row.rms > best.rms ? row : best), rows[0]);
+  const loudestX = xForTime(loudest.time).toFixed(1);
 
   return `
     <div class="waveform-card">
@@ -436,13 +795,71 @@ function audioWaveformHtml(audio) {
         <polyline class="waveform-peak" points="${peakPoints}"></polyline>
         <polyline class="waveform-rms" points="${rmsPoints}"></polyline>
         <line class="waveform-arrival" x1="${markerX}" y1="${padY}" x2="${markerX}" y2="${height - padY}"></line>
+        <line class="waveform-loudest" x1="${loudestX}" y1="${padY}" x2="${loudestX}" y2="${height - padY}"></line>
         <text class="waveform-label" x="${padX}" y="11">${maxDb} dBFS</text>
         <text class="waveform-label" x="${padX}" y="${height - 3}">${minDb} dBFS</text>
-        <text class="waveform-arrival-label" x="${Math.min(width - 64, Number(markerX) + 4).toFixed(1)}" y="28">Arrival</text>
+        <text class="waveform-arrival-label" x="${Math.min(width - 72, Number(markerX) + 4).toFixed(1)}" y="28">AIS arrival</text>
+        <text class="waveform-loudest-label" x="${Math.min(width - 44, Number(loudestX) + 4).toFixed(1)}" y="44">Peak</text>
       </svg>
       <div class="waveform-meta">
         <span>Window ${fmt(duration, 1, " s")}</span>
-        <span>Loudest ${fmt(loudest.time, 1, " s")} / ${fmt(loudest.rms, 1, " dBFS")}</span>
+        <span>Peak ${fmt(loudest.time, 1, " s")} / ${fmt(loudest.rms, 1, " dBFS")}</span>
+      </div>
+    </div>
+  `;
+}
+
+function interpolateChannel(a, b, t) {
+  return Math.round(a + (b - a) * t);
+}
+
+function interpolateColor(from, to, t) {
+  const start = from.match(/\w\w/g).map((value) => parseInt(value, 16));
+  const end = to.match(/\w\w/g).map((value) => parseInt(value, 16));
+  return `#${start.map((channel, index) => interpolateChannel(channel, end[index], t).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function heatColor(value, min, max) {
+  const t = Math.max(0, Math.min(1, (value - min) / Math.max(1, max - min)));
+  if (t < 0.45) return interpolateColor("#234a78", "#168f9f", t / 0.45);
+  if (t < 0.78) return interpolateColor("#168f9f", "#e2b33b", (t - 0.45) / 0.33);
+  return interpolateColor("#e2b33b", "#c53b2c", (t - 0.78) / 0.22);
+}
+
+function audioGradientHtml(audio) {
+  const waveform = audio.waveform || {};
+  const values = Array.isArray(waveform.rmsDbfs)
+    ? waveform.rmsDbfs.map(Number).filter((value) => Number.isFinite(value))
+    : [];
+  if (values.length < 2) return "";
+  const min = Math.floor(Math.min(...values) / 5) * 5;
+  const max = Math.ceil(Math.max(...values) / 5) * 5;
+  const stops = values.map((value, index) => {
+    const pct = values.length === 1 ? 0 : (index / (values.length - 1)) * 100;
+    return `${heatColor(value, min, max)} ${pct.toFixed(1)}%`;
+  }).join(", ");
+  const markerPct = (() => {
+    const duration = durationSeconds(audio.startUtc, audio.endUtc);
+    const eventOffset = Number(audio.eventOffsetSeconds);
+    if (!duration || !Number.isFinite(eventOffset)) return 50;
+    return Math.max(0, Math.min(100, (eventOffset / duration) * 100));
+  })();
+  const peakPct = (() => {
+    const duration = durationSeconds(audio.startUtc, audio.endUtc);
+    const peakOffset = loudestOffsetSeconds(audio);
+    if (!duration || peakOffset === null) return null;
+    return Math.max(0, Math.min(100, (peakOffset / duration) * 100));
+  })();
+  return `
+    <div class="sound-gradient-card">
+      <div class="sound-gradient" style="background: linear-gradient(90deg, ${stops})">
+        <span class="sound-gradient-marker" style="left:${markerPct.toFixed(1)}%"></span>
+        ${peakPct === null ? "" : `<span class="sound-gradient-peak" style="left:${peakPct.toFixed(1)}%"></span>`}
+      </div>
+      <div class="waveform-meta">
+        <span>${fmt(min, 0, " dBFS")}</span>
+        <span>AIS arrival / peak</span>
+        <span>${fmt(max, 0, " dBFS")}</span>
       </div>
     </div>
   `;
@@ -484,6 +901,7 @@ function audioProfileHtml(audio) {
       </div>
     `;
   }).join("");
+  const beamBlock = beamDirectionHtml(audio);
   return `
     <div class="detail-grid">
       <div class="metric"><span>RMS</span><b>${fmt(audio.rmsDbfsMean, 1, " dBFS")}</b></div>
@@ -491,7 +909,11 @@ function audioProfileHtml(audio) {
       <div class="metric"><span>Crest</span><b>${fmt(audio.crestFactorDb, 1, " dB")}</b></div>
       <div class="metric"><span>Coverage</span><b>${fmt(audio.coverageSeconds, 1, " s")}</b></div>
     </div>
+    <h4 class="mini-title">Hydrophone waveform</h4>
     ${audioWaveformHtml(audio)}
+    <h4 class="mini-title">Sound intensity gradient</h4>
+    ${audioGradientHtml(audio)}
+    ${beamBlock ? `<h4 class="mini-title">Direction check</h4>${beamBlock}` : ""}
     ${bandRows}
     <div class="timeline">${clean(audio.captureNote)}<br>${timingRows}<br>${clean(audio.fileName)}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
   `;
@@ -504,12 +926,17 @@ function renderVesselDetail(vessel) {
     <p>${vessel.id} - ${clean(vessel.shipType)} - ${clean(vessel.typeOfMobile)}</p>
     <div class="detail-grid">
       <div class="metric"><span>Closest point</span><b>${fmt(vessel.closestDistanceKm, 2, " km")}</b></div>
+      <div class="metric"><span>Audio source</span><b>${fmt(vesselEventDistanceKm(vessel), 2, " km")}</b></div>
       <div class="metric"><span>Bearing</span><b>${fmt(vessel.closestBearingDeg, 0, " deg")}</b></div>
+      <div class="metric"><span>Association</span><b>${associationStatus(vessel)}</b></div>
+      <div class="metric"><span>Beam error</span><b>${fmt(vessel.audio?.beam?.bearingErrorDeg, 0, " deg")}</b></div>
+      <div class="metric"><span>Beam confidence</span><b>${fmt(vessel.audio?.beam?.confidence, 2)}</b></div>
       <div class="metric"><span>Max speed</span><b>${fmt(vessel.maxSog, 1, " kn")}</b></div>
       <div class="metric"><span>Length</span><b>${fmt(vessel.maxLength, 0, " m")}</b></div>
       <div class="metric"><span>Draught</span><b>${fmt(vessel.maxDraught, 1, " m")}</b></div>
       <div class="metric"><span>AIS rows</span><b>${vessel.rowCount}</b></div>
     </div>
+    ${associationContextHtml(vessel)}
     <h3 class="section-title">Acoustic profile</h3>
     ${audioProfileHtml(vessel.audio)}
     <h3 class="section-title">AIS track</h3>
@@ -518,19 +945,24 @@ function renderVesselDetail(vessel) {
 }
 
 function renderCtdDetail(event) {
+  const audio = event.audio || {};
   detailPanel.innerHTML = `
     <div class="detail-kicker">CTD</div>
     <h2>CTD ${clean(event.station || event.id)}</h2>
     <p>${clean(event.fileName)}</p>
     <div class="detail-grid">
       <div class="metric"><span>Hydrophone distance</span><b>${fmt(event.distanceToHydrophoneKm, 2, " km")}</b></div>
-      <div class="metric"><span>Audio overlap</span><b>${event.recordedByHydrophone ? "Yes" : "No"}</b></div>
+      <div class="metric"><span>Detection</span><b>${ctdDetected(event) ? "Yes" : "No"}</b></div>
       <div class="metric"><span>Depth</span><b>${fmt(event.depthMinM, 1)}-${fmt(event.depthMaxM, 1, " m")}</b></div>
       <div class="metric"><span>Temperature</span><b>${fmt(event.temperatureMinC, 1)}-${fmt(event.temperatureMaxC, 1, " C")}</b></div>
       <div class="metric"><span>Salinity</span><b>${fmt(event.salinityMinPsu, 1)}-${fmt(event.salinityMaxPsu, 1, " PSU")}</b></div>
+      <div class="metric"><span>CTD bearing</span><b>${fmt(audio.sourceBearingDeg, 0, " deg")}</b></div>
+      <div class="metric"><span>Beam error</span><b>${fmt(audio.beam?.bearingErrorDeg, 0, " deg")}</b></div>
     </div>
     <h3 class="section-title">Cast window</h3>
     <div class="timeline">${clean(event.startUtc)}<br>${clean(event.endUtc)}</div>
+    <h3 class="section-title">Detection geometry</h3>
+    <div class="timeline">CTD position: ${fmt(event.latitude, 5)}, ${fmt(event.longitude, 5)}<br>Hydrophone arrival: ${clean(audio.eventTimeUtc)}<br>Sound delay: ${fmt(audio.propagationDelaySeconds, 1, " s")}</div>
     <h3 class="section-title">Acoustic profile</h3>
     ${audioProfileHtml(event.audio)}
   `;
