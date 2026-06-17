@@ -120,6 +120,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Geographic bearing of array angle 0. Leave unset for array-relative angles only.",
     )
+    parser.add_argument(
+        "--array-angle-sign",
+        type=int,
+        choices=(-1, 1),
+        default=1,
+        help="Use 1 for bearing = heading + angle, or -1 if channel/order calibration shows the opposite sign.",
+    )
     parser.add_argument("--cache-files", type=int, default=8)
     return parser.parse_args()
 
@@ -285,6 +292,7 @@ def compute_beam_summary(
     fmin_hz: float,
     fmax_hz: float,
     array_heading_deg: float | None,
+    array_angle_sign: int,
     source_bearing_deg: float | None,
 ) -> dict[str, str]:
     result = empty_beam_values()
@@ -362,11 +370,13 @@ def compute_beam_summary(
     if array_heading_deg is None:
         notes.append("Array heading is not set, so angles are array-relative.")
     else:
-        bearing_candidates = [((angle + array_heading_deg) % 360.0) for angle in angle_candidates]
+        bearing_candidates = [((array_heading_deg + array_angle_sign * angle) % 360.0) for angle in angle_candidates]
         result["beam_bearing_candidates_deg"] = json.dumps(
             [round(bearing, 3) for bearing in bearing_candidates],
             separators=(",", ":"),
         )
+        if array_angle_sign < 0:
+            notes.append("Array angle sign is inverted by calibration.")
         if source_bearing_deg is not None:
             best_bearing = min(
                 bearing_candidates,
@@ -483,6 +493,7 @@ def profile_row(
     mic_spacing_m: float,
     sound_speed_m_s: float,
     array_heading_deg: float | None,
+    array_angle_sign: int,
 ) -> dict[str, str]:
     samples, sample_rate, files, audio_offset_seconds = extract_audio_window(
         recordings=recordings,
@@ -533,6 +544,7 @@ def profile_row(
                 fmin_hz=beam_fmin_hz,
                 fmax_hz=beam_fmax_hz,
                 array_heading_deg=array_heading_deg,
+                array_angle_sign=array_angle_sign,
                 source_bearing_deg=source_bearing_deg,
             )
         )
@@ -681,6 +693,7 @@ def main() -> None:
                 mic_spacing_m=args.mic_spacing_m,
                 sound_speed_m_s=args.sound_speed_m_s,
                 array_heading_deg=args.array_heading_deg,
+                array_angle_sign=args.array_angle_sign,
             )
             writer.writerow(row)
             captured += row["captured"] == "true"

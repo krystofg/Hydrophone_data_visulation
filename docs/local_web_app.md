@@ -21,15 +21,34 @@ For stereo WAV files, the event profile step also computes a two-channel time-di
 Useful optional settings:
 
 ```powershell
-$env:HYDROPHONE_MIC_SPACING_M = "0.75"
+$env:HYDROPHONE_MIC_SPACING_M = "0.98"
+$env:HYDROPHONE_SOUND_SPEED_M_S = "1445"
 # Optional, only after calibration:
 # $env:HYDROPHONE_ARRAY_HEADING_DEG = "0"
+# $env:HYDROPHONE_ARRAY_ANGLE_SIGN = "1"
 # Optional frequency band for the direction check:
 # $env:HYDROPHONE_BEAM_FMIN_HZ = "50"
 # $env:HYDROPHONE_BEAM_FMAX_HZ = "900"
 ```
 
 If `HYDROPHONE_ARRAY_HEADING_DEG` is not set, the app shows array-relative angle candidates only. With a calibrated heading, the app also shows beam bearing candidates, best beam/AIS match, bearing error, and dashed beam rays on the map.
+Use `scripts\estimate_array_heading.py` to estimate both `HYDROPHONE_ARRAY_HEADING_DEG` and `HYDROPHONE_ARRAY_ANGLE_SIGN` from already-built event profiles before trusting beam bearings.
+
+## Target-vessel calibration
+
+For a better calibration pass, build many small audio windows around a few trusted vessels instead of using one event per vessel. The script samples AIS points for the selected target ships, shifts each point by acoustic propagation delay, extracts the matching hydrophone window, rejects weak/ambiguous windows, and estimates the array heading/sign from the surviving beam angles.
+
+```powershell
+& "C:\Users\kryst\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" scripts\calibrate_target_vessels.py --target-vessel HAVFISKEN --target-vessel "FRENCH WARSHIP" --target-vessel VICTORY --target-vessel SALSA --mic-spacing-m 0.98 --sound-speed-m-s 1445 --sample-step-seconds 10 --window-seconds 20
+```
+
+Outputs:
+
+- `outputs/processing/target_vessel_audio_profiles.csv`
+- `outputs/processing/target_vessel_calibration_candidates.csv`
+- `outputs/processing/target_vessel_calibration.json`
+
+Only apply the reported `suggestedEnvironment` values when the JSON status is `usable`, or after manually inspecting a `tentative` result. If the status is `inconsistent`, the selected target windows disagree and the app should not use that heading.
 
 ## Build clickable app
 
@@ -45,6 +64,22 @@ The standalone file embeds the compact data JSON, CSS, and JavaScript. It uses L
 The final map only shows vessels with a captured per-event acoustic profile. CTD events stay visible so you can compare casts with captured or missing audio windows.
 The default vessel view shows likely isolated AIS/audio candidates within 2.5 km. Use the `All signals` toggle to show every vessel with a captured profile, including ambiguous shared audio windows. AIS track lines, radial bearing lines, distance rings, and calibrated beam rays are drawn only for the selected vessel or CTD cast.
 CTD detection is based on the captured event audio profile, not only on raw recording time overlap.
+
+## Vessel sound profile matching
+
+After event profiles have been built, rank captured vessel windows by acoustic similarity:
+
+```powershell
+& "C:\Users\kryst\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" scripts\match_vessel_sound_profile.py --query-vessel SALSA --top 20
+```
+
+Outputs:
+
+- `outputs/processing/vessel_sound_matches.csv`
+- `outputs/processing/vessel_sound_fingerprints.csv`
+- `outputs/processing/vessel_sound_match_report.json`
+
+The matcher uses compact event-profile features: frequency-band shape, RMS/peak/crest, rough distance-corrected levels, waveform envelope shape, stereo correlation, and calibrated beam agreement when available. It ranks acoustic similarity between captured windows; it is not unique vessel identification unless the same vessel has repeated clean reference profiles.
 
 ## Full rebuild from raw processed data
 

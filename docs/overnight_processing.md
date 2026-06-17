@@ -69,6 +69,10 @@ Output:
 After AIS and recording features exist, build the app data and per-event audio windows:
 
 ```powershell
+$env:HYDROPHONE_MIC_SPACING_M = "0.98"
+$env:HYDROPHONE_SOUND_SPEED_M_S = "1445"
+# Optional, only after array-heading calibration:
+# $env:HYDROPHONE_ARRAY_HEADING_DEG = "0"
 powershell.exe -ExecutionPolicy Bypass -File scripts\build_clickable_app.ps1
 ```
 
@@ -82,17 +86,70 @@ The final app data hides vessels without a captured event acoustic profile.
 Each captured event profile stores a compact audio envelope, not raw samples, so the web app can draw a quick sound graph without embedding the original WAV data.
 The clickable app defaults to likely isolated nearby AIS/audio vessel candidates, draws radial geometry only for the selected vessel or CTD cast, and draws AIS tracks only for the selected vessel.
 
+Stereo event profiles also compute a two-channel TDOA direction check. This is a consistency check, not proof that the selected vessel is the only source. With only two channels there is mirror ambiguity, so `HYDROPHONE_ARRAY_HEADING_DEG` must be calibrated before beam bearings and beam/AIS bearing error can be treated as map evidence. Without that setting, the app still shows array-relative angle candidates.
+
+## 7. Estimate array heading before trusting beam bearings
+
+After building event profiles once without `HYDROPHONE_ARRAY_HEADING_DEG`, estimate the array heading from close, loud, isolated AIS/audio candidates:
+
+```powershell
+& "C:\Users\kryst\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" scripts\estimate_array_heading.py
+```
+
+Outputs:
+
+- `outputs/processing/array_heading_estimate.json`
+- `outputs/processing/array_heading_candidates.csv`
+
+Only use the suggested heading if the report status is `usable` or, after manual inspection, `tentative`. If the status is `inconsistent`, the vessels disagree and the heading should not be set blindly.
+
+For a manual calibration pass using only vessels you trust:
+
+```powershell
+& "C:\Users\kryst\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" scripts\estimate_array_heading.py --include-vessel HAVFISKEN --include-vessel "FRENCH WARSHIP" --include-vessel VICTORY --min-confidence 0.1 --max-distance-km 3
+```
+
+If the report says the calibration is usable, rebuild event profiles and the app with both values:
+
+```powershell
+$env:HYDROPHONE_ARRAY_HEADING_DEG = "REPORTED_HEADING"
+$env:HYDROPHONE_ARRAY_ANGLE_SIGN = "REPORTED_SIGN"
+powershell.exe -ExecutionPolicy Bypass -File scripts\build_clickable_app.ps1
+```
+
+## 8. Target-vessel calibration from repeated windows
+
+When you have a few vessels you trust visually, run a stronger calibration pass across many AIS-aligned audio windows for those vessels. This is better than calibrating from one event window per vessel because it tests whether the beam direction stays consistent during the pass.
+
+```powershell
+& "C:\Users\kryst\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" scripts\calibrate_target_vessels.py --target-vessel HAVFISKEN --target-vessel "FRENCH WARSHIP" --target-vessel VICTORY --target-vessel SALSA --mic-spacing-m 0.98 --sound-speed-m-s 1445 --sample-step-seconds 10 --window-seconds 20
+```
+
+Outputs:
+
+- `outputs/processing/target_vessel_audio_profiles.csv`
+- `outputs/processing/target_vessel_calibration_candidates.csv`
+- `outputs/processing/target_vessel_calibration.json`
+
+Use the JSON `suggestedEnvironment` values only when `status` is `usable`, or after manually inspecting `target_vessel_calibration_candidates.csv` for a `tentative` result.
+
 ## One-command overnight run
 
 After the smoke tests pass, run the full sequence with logging:
 
 ```powershell
-.\scripts\run_overnight_processing.ps1
+$env:HYDROPHONE_MIC_SPACING_M = "0.98"
+$env:HYDROPHONE_SOUND_SPEED_M_S = "1445"
+# Optional, only after calibration:
+# $env:HYDROPHONE_ARRAY_HEADING_DEG = "0"
+powershell.exe -ExecutionPolicy Bypass -File scripts\run_full_processing_and_build_app.ps1
 ```
 
 Logs are written to:
 
 - `outputs/processing/logs`
+
+Use `scripts\run_overnight_processing.ps1` only when you want the raw processing outputs without rebuilding the clickable app.
 
 ## Notes
 

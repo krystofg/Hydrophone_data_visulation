@@ -221,6 +221,68 @@ p {
   position: relative;
 }
 
+.sound-track-panel {
+  left: 14px;
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  z-index: 4;
+}
+
+.sound-track-card {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--line);
+  border-left: 4px solid #d24b26;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(24, 33, 47, 0.12);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(150px, 0.9fr) minmax(260px, 2fr) minmax(180px, 1.2fr);
+  padding: 10px 12px;
+}
+
+.sound-track-card.is-empty {
+  border-left-color: var(--muted);
+  grid-template-columns: minmax(180px, 1fr) auto;
+}
+
+.sound-track-kicker {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.sound-track-card b {
+  display: block;
+  font-size: 15px;
+}
+
+.sound-track-metrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.sound-track-metrics span,
+.sound-track-note,
+.sound-track-card.is-empty span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sound-track-metrics b {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.sound-track-note {
+  line-height: 1.25;
+}
+
 .leaflet-map,
 #mapSvg {
   inset: 0;
@@ -259,6 +321,22 @@ p {
   height: 10px;
   margin-right: 6px;
   width: 10px;
+}
+
+.legend-line {
+  border-top: 2px dashed currentColor;
+  display: inline-block;
+  margin-bottom: 3px;
+  margin-right: 6px;
+  width: 18px;
+}
+
+.legend-line.beam {
+  color: var(--hydro);
+}
+
+.legend-line.sound {
+  color: #d24b26;
 }
 
 .legend-dot.vessel {
@@ -339,6 +417,10 @@ p {
   stroke-width: 4;
 }
 
+.track.sound-track {
+  stroke: #d24b26;
+}
+
 .radial-line {
   opacity: 0.9;
   stroke: var(--accent);
@@ -371,6 +453,12 @@ p {
   stroke-width: 3;
 }
 
+.marker.sound-point {
+  fill: #d24b26;
+  stroke: #ffffff;
+  stroke-width: 2;
+}
+
 .marker.is-selected {
   stroke: var(--accent);
   stroke-width: 4;
@@ -380,6 +468,10 @@ p {
   background: #dce6e8;
   color: var(--ink);
   font: inherit;
+}
+
+.map-panel .leaflet-top.leaflet-left {
+  top: 84px;
 }
 
 .leaflet-control-attribution {
@@ -712,6 +804,21 @@ p {
   .sidebar,
   .detail-panel {
     border: 0;
+  }
+
+  .sound-track-panel {
+    left: 10px;
+    right: 10px;
+  }
+
+  .sound-track-card,
+  .sound-track-card.is-empty {
+    align-items: start;
+    grid-template-columns: 1fr;
+  }
+
+  .sound-track-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .entity-list {

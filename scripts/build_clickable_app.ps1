@@ -9,8 +9,14 @@ $EventAudioArgs = @("scripts\build_event_audio_profiles.py")
 if ($env:HYDROPHONE_MIC_SPACING_M) {
     $EventAudioArgs += @("--mic-spacing-m", $env:HYDROPHONE_MIC_SPACING_M)
 }
+if ($env:HYDROPHONE_SOUND_SPEED_M_S) {
+    $EventAudioArgs += @("--sound-speed-m-s", $env:HYDROPHONE_SOUND_SPEED_M_S)
+}
 if ($env:HYDROPHONE_ARRAY_HEADING_DEG) {
     $EventAudioArgs += @("--array-heading-deg", $env:HYDROPHONE_ARRAY_HEADING_DEG)
+}
+if ($env:HYDROPHONE_ARRAY_ANGLE_SIGN) {
+    $EventAudioArgs += @("--array-angle-sign", $env:HYDROPHONE_ARRAY_ANGLE_SIGN)
 }
 if ($env:HYDROPHONE_BEAM_FMIN_HZ) {
     $EventAudioArgs += @("--beam-fmin-hz", $env:HYDROPHONE_BEAM_FMIN_HZ)

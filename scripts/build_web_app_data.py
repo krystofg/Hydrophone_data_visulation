@@ -39,6 +39,12 @@ AUDIO_FEATURE_CANDIDATES = [
 EVENT_AUDIO_PROFILE_CANDIDATES = [
     Path("outputs/processing/event_audio_profiles.csv"),
 ]
+TARGET_VESSEL_PROFILE_CANDIDATES = [
+    Path("outputs/processing/target_vessel_audio_profiles.csv"),
+]
+TARGET_VESSEL_CALIBRATION_CANDIDATES = [
+    Path("outputs/processing/target_vessel_calibration.json"),
+]
 CTD_CANDIDATES = [
     Path("outputs/ctd_events.csv"),
 ]
@@ -69,11 +75,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-events-csv", type=Path, default=None)
     parser.add_argument("--audio-features-csv", type=Path, default=None)
     parser.add_argument("--event-audio-profiles-csv", type=Path, default=None)
+    parser.add_argument("--target-vessel-profiles-csv", type=Path, default=None)
+    parser.add_argument("--target-vessel-calibration-json", type=Path, default=None)
     parser.add_argument("--ctd-events-csv", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("web/data/app_data.json"))
     parser.add_argument("--max-vessels", type=int, default=0, help="Maximum vessels to include; 0 means all.")
     parser.add_argument("--max-track-points-per-vessel", type=int, default=80)
     parser.add_argument("--max-ais-rows", type=int, default=0, help="Maximum AIS rows to read; 0 means all.")
+    parser.add_argument(
+        "--sound-track-reference-distance-km",
+        type=float,
+        default=0.2,
+        help="Relative range assigned to the loudest acoustic-only sound-track point.",
+    )
     parser.add_argument(
         "--include-vessels-without-audio",
         action="store_true",
@@ -282,6 +296,173 @@ def profile_from_row(row: dict[str, str]) -> dict[str, object]:
     }
 
 
+def angular_difference_deg(a: float, b: float) -> float:
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def destination_lat_lon(lat: float, lon: float, bearing: float, distance_km: float) -> tuple[float, float]:
+    radius_km = 6371.0088
+    angular_distance = distance_km / radius_km
+    bearing_rad = math.radians(bearing)
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lon)
+    lat2 = math.asin(
+        math.sin(lat1) * math.cos(angular_distance)
+        + math.cos(lat1) * math.sin(angular_distance) * math.cos(bearing_rad)
+    )
+    lon2 = lon1 + math.atan2(
+        math.sin(bearing_rad) * math.sin(angular_distance) * math.cos(lat1),
+        math.cos(angular_distance) - math.sin(lat1) * math.sin(lat2),
+    )
+    return math.degrees(lat2), ((math.degrees(lon2) + 540.0) % 360.0) - 180.0
+
+
+def loudest_peak_time(row: dict[str, str]) -> str:
+    start = parse_datetime(row.get("window_start_utc"))
+    waveform_times = parse_float_list(row.get("waveform_times_seconds"))
+    waveform_rms = parse_float_list(row.get("waveform_rms_dbfs"))
+    if start is None or not waveform_times or not waveform_rms:
+        return row.get("event_time_utc", "")
+    pairs = [
+        (time_seconds, rms)
+        for time_seconds, rms in zip(waveform_times, waveform_rms)
+        if time_seconds is not None and rms is not None
+    ]
+    if not pairs:
+        return row.get("event_time_utc", "")
+    peak_offset = max(pairs, key=lambda item: item[1])[0]
+    return iso(start + dt.timedelta(seconds=peak_offset))
+
+
+def read_target_calibration(path: Path | None) -> dict[str, object]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def calibration_heading(calibration: dict[str, object]) -> tuple[float | None, int]:
+    suggested = calibration.get("suggestedEnvironment") if isinstance(calibration, dict) else {}
+    if not isinstance(suggested, dict):
+        return None, 1
+    heading = parse_float(suggested.get("HYDROPHONE_ARRAY_HEADING_DEG"))
+    sign_value = parse_float(suggested.get("HYDROPHONE_ARRAY_ANGLE_SIGN"))
+    sign = -1 if sign_value is not None and sign_value < 0 else 1
+    return heading, sign
+
+
+def sound_bearing_candidates(row: dict[str, str], heading: float | None, sign: int) -> list[float]:
+    bearings = parse_float_list(row.get("beam_bearing_candidates_deg"))
+    if bearings:
+        return [bearing % 360.0 for bearing in bearings]
+    if heading is None:
+        return []
+    angles = parse_float_list(row.get("beam_angle_candidates_deg"))
+    return [((heading + sign * angle) % 360.0) for angle in angles]
+
+
+def choose_continuous_bearing(candidates: list[float], previous: float | None) -> float | None:
+    clean_candidates = [candidate for candidate in candidates if candidate is not None]
+    if not clean_candidates:
+        return None
+    if previous is None:
+        return clean_candidates[0]
+    return min(clean_candidates, key=lambda candidate: angular_difference_deg(candidate, previous))
+
+
+def read_sound_tracks(
+    profile_path: Path | None,
+    calibration_path: Path | None,
+    reference_distance_km: float,
+) -> list[dict[str, object]]:
+    if profile_path is None or not profile_path.exists():
+        return []
+
+    calibration = read_target_calibration(calibration_path)
+    heading, sign = calibration_heading(calibration)
+    grouped: dict[str, list[dict[str, object]]] = {}
+
+    with profile_path.open("r", encoding="utf-8-sig", errors="replace", newline="") as csv_file:
+        for row in csv.DictReader(csv_file):
+            if row.get("event_type", "").strip().lower() != "vessel":
+                continue
+            if row.get("captured", "").strip().lower() != "true":
+                continue
+            vessel_id = row.get("event_id", "").strip()
+            if not vessel_id:
+                continue
+            rms = parse_float(row.get("rms_dbfs_mean"))
+            peak = parse_float(row.get("peak_dbfs"))
+            confidence = parse_float(row.get("beam_confidence"))
+            bearing_candidates = sound_bearing_candidates(row, heading, sign)
+            if rms is None or not bearing_candidates:
+                continue
+            grouped.setdefault(vessel_id, []).append(
+                {
+                    "row": row,
+                    "rms": rms,
+                    "peak": peak,
+                    "confidence": confidence,
+                    "bearingCandidates": bearing_candidates,
+                    "timeUtc": loudest_peak_time(row),
+                }
+            )
+
+    tracks: list[dict[str, object]] = []
+    for vessel_id, items in grouped.items():
+        items.sort(key=lambda item: str(item.get("timeUtc", "")))
+        max_rms = max(float(item["rms"]) for item in items)
+        previous_bearing: float | None = None
+        points: list[dict[str, object]] = []
+        for item in items:
+            row = item["row"]
+            bearing = choose_continuous_bearing(item["bearingCandidates"], previous_bearing)
+            if bearing is None:
+                continue
+            previous_bearing = bearing
+            rms = float(item["rms"])
+            range_km = reference_distance_km * (10.0 ** ((max_rms - rms) / 20.0))
+            range_km = max(0.05, min(8.0, range_km))
+            lat, lon = destination_lat_lon(HYDROPHONE["latitude"], HYDROPHONE["longitude"], bearing, range_km)
+            points.append(
+                {
+                    "profileId": row.get("profile_id", ""),
+                    "timeUtc": item["timeUtc"],
+                    "windowStartUtc": row.get("window_start_utc", ""),
+                    "windowEndUtc": row.get("window_end_utc", ""),
+                    "latitude": lat,
+                    "longitude": lon,
+                    "bearingDeg": bearing,
+                    "bearingCandidatesDeg": [round(value, 3) for value in item["bearingCandidates"]],
+                    "rangeEstimateKm": range_km,
+                    "rangeModel": "relative_level_to_loudest_window",
+                    "rmsDbfs": rms,
+                    "peakDbfs": item["peak"],
+                    "beamConfidence": item["confidence"],
+                    "nearbyVesselCount": parse_float(row.get("nearby_vessel_count")),
+                }
+            )
+
+        if points:
+            first_row = items[0]["row"]
+            tracks.append(
+                {
+                    "vesselId": vessel_id,
+                    "vesselName": first_row.get("event_label", vessel_id),
+                    "targetQuery": first_row.get("target_query", ""),
+                    "pointCount": len(points),
+                    "points": points,
+                    "calibrationStatus": calibration.get("status", "") if isinstance(calibration, dict) else "",
+                    "method": "beam bearing plus relative sound-level range",
+                    "note": "Acoustic-only coordinates use calibrated beam bearing and relative level range; AIS coordinates are not used for these plotted points.",
+                }
+            )
+    tracks.sort(key=lambda track: str(track.get("vesselName", "")))
+    return tracks
+
+
 def read_event_audio_profiles(path: Path | None) -> dict[str, dict[str, dict[str, object]]]:
     profiles: dict[str, dict[str, dict[str, object]]] = {"vessel": {}, "ctd": {}}
     if path is None or not path.exists():
@@ -456,7 +637,11 @@ def read_ctd_events(path: Path | None, event_profiles: dict[str, dict[str, dict[
     return events
 
 
-def bounds_for(vessels: list[dict[str, object]], ctd_events: list[dict[str, object]]) -> dict[str, float]:
+def bounds_for(
+    vessels: list[dict[str, object]],
+    ctd_events: list[dict[str, object]],
+    sound_tracks: list[dict[str, object]],
+) -> dict[str, float]:
     latitudes = [HYDROPHONE["latitude"]]
     longitudes = [HYDROPHONE["longitude"]]
     for vessel in vessels:
@@ -466,6 +651,13 @@ def bounds_for(vessels: list[dict[str, object]], ctd_events: list[dict[str, obje
     for event in ctd_events:
         latitudes.append(float(event["latitude"]))
         longitudes.append(float(event["longitude"]))
+    for track in sound_tracks:
+        for point in track.get("points", []):
+            lat = parse_float(point.get("latitude")) if isinstance(point, dict) else None
+            lon = parse_float(point.get("longitude")) if isinstance(point, dict) else None
+            if lat is not None and lon is not None:
+                latitudes.append(lat)
+                longitudes.append(lon)
     pad_lat = max((max(latitudes) - min(latitudes)) * 0.08, 0.005)
     pad_lon = max((max(longitudes) - min(longitudes)) * 0.08, 0.005)
     return {
@@ -482,10 +674,19 @@ def main() -> None:
     audio_events_csv = args.audio_events_csv or first_existing(AUDIO_EVENT_CANDIDATES)
     audio_features_csv = args.audio_features_csv or first_existing(AUDIO_FEATURE_CANDIDATES)
     event_audio_profiles_csv = args.event_audio_profiles_csv or first_existing(EVENT_AUDIO_PROFILE_CANDIDATES)
+    target_vessel_profiles_csv = args.target_vessel_profiles_csv or first_existing(TARGET_VESSEL_PROFILE_CANDIDATES)
+    target_vessel_calibration_json = (
+        args.target_vessel_calibration_json or first_existing(TARGET_VESSEL_CALIBRATION_CANDIDATES)
+    )
     ctd_events_csv = args.ctd_events_csv or first_existing(CTD_CANDIDATES)
 
     profiles = read_audio_profiles(audio_events_csv) or read_audio_profiles(audio_features_csv)
     event_profiles = read_event_audio_profiles(event_audio_profiles_csv)
+    sound_tracks = read_sound_tracks(
+        target_vessel_profiles_csv,
+        target_vessel_calibration_json,
+        reference_distance_km=args.sound_track_reference_distance_km,
+    )
     vessels = read_vessels(
         ais_csv,
         profiles,
@@ -504,22 +705,30 @@ def main() -> None:
                 "audioEventsCsv": str(audio_events_csv) if audio_events_csv else "",
                 "audioFeaturesCsv": str(audio_features_csv) if audio_features_csv else "",
                 "eventAudioProfilesCsv": str(event_audio_profiles_csv) if event_audio_profiles_csv else "",
+                "targetVesselProfilesCsv": str(target_vessel_profiles_csv) if target_vessel_profiles_csv else "",
+                "targetVesselCalibrationJson": str(target_vessel_calibration_json) if target_vessel_calibration_json else "",
                 "ctdEventsCsv": str(ctd_events_csv) if ctd_events_csv else "",
             },
             "vesselCount": len(vessels),
             "ctdCount": len(ctd_events),
             "audioProfileCount": len(profiles),
             "eventAudioProfileCount": sum(len(items) for items in event_profiles.values()),
+            "soundTrackCount": len(sound_tracks),
+            "soundTrackPointCount": sum(len(track.get("points", [])) for track in sound_tracks),
         },
         "hydrophone": HYDROPHONE,
-        "bounds": bounds_for(vessels, ctd_events),
+        "bounds": bounds_for(vessels, ctd_events, sound_tracks),
         "vessels": vessels,
         "ctdEvents": ctd_events,
+        "soundTracks": sound_tracks,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(data, indent=2), encoding="utf-8")
     print(f"Wrote {args.output}")
-    print(f"Vessels: {len(vessels)}; CTD events: {len(ctd_events)}; audio profiles: {len(profiles)}")
+    print(
+        f"Vessels: {len(vessels)}; CTD events: {len(ctd_events)}; "
+        f"audio profiles: {len(profiles)}; sound tracks: {len(sound_tracks)}"
+    )
 
 
 if __name__ == "__main__":

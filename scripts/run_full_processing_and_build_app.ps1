@@ -33,8 +33,14 @@ function Get-EventAudioProfileArguments {
     if ($env:HYDROPHONE_MIC_SPACING_M) {
         $Arguments += @("--mic-spacing-m", $env:HYDROPHONE_MIC_SPACING_M)
     }
+    if ($env:HYDROPHONE_SOUND_SPEED_M_S) {
+        $Arguments += @("--sound-speed-m-s", $env:HYDROPHONE_SOUND_SPEED_M_S)
+    }
     if ($env:HYDROPHONE_ARRAY_HEADING_DEG) {
         $Arguments += @("--array-heading-deg", $env:HYDROPHONE_ARRAY_HEADING_DEG)
+    }
+    if ($env:HYDROPHONE_ARRAY_ANGLE_SIGN) {
+        $Arguments += @("--array-angle-sign", $env:HYDROPHONE_ARRAY_ANGLE_SIGN)
     }
     if ($env:HYDROPHONE_BEAM_FMIN_HZ) {
         $Arguments += @("--beam-fmin-hz", $env:HYDROPHONE_BEAM_FMIN_HZ)
