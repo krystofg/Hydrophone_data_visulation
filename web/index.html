@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hydrophone Vessel Workbench</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>Hydrophone Vessel Workbench</h1>
+        <p id="sourceLine">Loading data</p>
+      </div>
+      <div class="stats" id="stats"></div>
+    </header>
+
+    <section class="workspace">
+      <aside class="sidebar">
+        <div class="toolbar">
+          <div class="segmented" aria-label="Layer filter">
+            <button class="segment is-active" data-mode="vessels">Vessels</button>
+            <button class="segment" data-mode="ctd">CTD</button>
+            <button class="segment" data-mode="all">All</button>
+          </div>
+          <input id="searchInput" type="search" placeholder="Search" autocomplete="off">
+        </div>
+        <div id="entityList" class="entity-list"></div>
+      </aside>
+
+      <section class="map-panel">
+        <svg id="mapSvg" role="img" aria-label="Vessel and CTD map"></svg>
+        <div class="map-legend">
+          <span><i class="legend-dot vessel"></i>Vessel</span>
+          <span><i class="legend-dot ctd"></i>CTD</span>
+          <span><i class="legend-dot hydrophone"></i>Hydrophone</span>
+        </div>
+      </section>
+
+      <aside class="detail-panel" id="detailPanel"></aside>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

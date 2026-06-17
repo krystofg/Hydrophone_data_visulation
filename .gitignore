@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.codex_pydeps/
+Data/
+outputs/
+web/data/*.json
+web/hydrophone_app.html
