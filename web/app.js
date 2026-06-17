@@ -72,7 +72,7 @@ function renderStats() {
   stats.innerHTML = [
     ["Vessels", metadata.vesselCount],
     ["CTD", metadata.ctdCount],
-    ["Audio profiles", metadata.audioProfileCount]
+    ["Event audio", metadata.eventAudioProfileCount || metadata.audioProfileCount]
   ].map(([label, value]) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`).join("");
   const source = metadata.sources.aisCsv || "no AIS source";
   sourceLine.textContent = source;
@@ -121,13 +121,90 @@ function svgElement(name, attrs = {}) {
   return element;
 }
 
+function pathFromGeo(points) {
+  return points.map(([lat, lon]) => {
+    const p = project(lat, lon);
+    return `${p.x.toFixed(2)},${p.y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function addSvgText(text, attrs = {}) {
+  const element = svgElement("text", attrs);
+  element.textContent = text;
+  svg.appendChild(element);
+  return element;
+}
+
+function renderBasemap() {
+  const b = state.data.bounds;
+  svg.appendChild(svgElement("rect", { x: 0, y: 0, width: 1000, height: 1000, class: "water" }));
+
+  const latSpan = b.maxLat - b.minLat;
+  const lonSpan = b.maxLon - b.minLon;
+  for (let i = 1; i < 5; i += 1) {
+    const lat = b.minLat + (latSpan * i) / 5;
+    const y = project(lat, b.minLon).y;
+    svg.appendChild(svgElement("line", { class: "grid-line", x1: 0, y1: y, x2: 1000, y2: y }));
+    addSvgText(`${lat.toFixed(3)} N`, { class: "grid-label", x: 12, y: y - 5 });
+
+    const lon = b.minLon + (lonSpan * i) / 5;
+    const x = project(b.minLat, lon).x;
+    svg.appendChild(svgElement("line", { class: "grid-line", x1: x, y1: 0, x2: x, y2: 1000 }));
+    addSvgText(`${lon.toFixed(3)} E`, { class: "grid-label", x: x + 5, y: 985 });
+  }
+
+  const westCoast = [
+    [b.maxLat, Math.max(b.minLon + lonSpan * 0.10, 12.58)],
+    [55.865, 12.620],
+    [55.835, 12.606],
+    [55.805, 12.631],
+    [55.770, 12.612],
+    [55.735, 12.632],
+    [55.690, 12.600],
+    [b.minLat, Math.max(b.minLon + lonSpan * 0.08, 12.56)]
+  ];
+  const eastCoast = [
+    [b.maxLat, Math.min(b.maxLon - lonSpan * 0.10, 12.86)],
+    [55.870, 12.820],
+    [55.835, 12.842],
+    [55.800, 12.830],
+    [55.765, 12.858],
+    [55.725, 12.885],
+    [55.685, 12.862],
+    [b.minLat, Math.min(b.maxLon - lonSpan * 0.08, 12.90)]
+  ];
+  const westPoly = [[b.maxLat, b.minLon], [b.minLat, b.minLon], ...westCoast.slice().reverse(), [b.maxLat, Math.max(b.minLon + lonSpan * 0.10, 12.58)]];
+  const eastPoly = [[b.maxLat, b.maxLon], [b.minLat, b.maxLon], ...eastCoast.slice().reverse(), [b.maxLat, Math.min(b.maxLon - lonSpan * 0.10, 12.86)]];
+
+  svg.appendChild(svgElement("polygon", { class: "land", points: pathFromGeo(westPoly) }));
+  svg.appendChild(svgElement("polygon", { class: "land", points: pathFromGeo(eastPoly) }));
+  svg.appendChild(svgElement("polyline", { class: "coast", points: pathFromGeo(westCoast) }));
+  svg.appendChild(svgElement("polyline", { class: "coast", points: pathFromGeo(eastCoast) }));
+
+  const denmark = project(b.minLat + latSpan * 0.76, b.minLon + lonSpan * 0.12);
+  const sweden = project(b.minLat + latSpan * 0.78, b.maxLon - lonSpan * 0.17);
+  addSvgText("Denmark", { class: "place-label", x: denmark.x, y: denmark.y });
+  addSvgText("Sweden", { class: "place-label", x: sweden.x, y: sweden.y });
+
+  const scaleLat = b.minLat + latSpan * 0.08;
+  const scaleLon = b.minLon + lonSpan * 0.10;
+  const kmPerLonDegree = 111.32 * Math.cos((state.data.hydrophone.latitude * Math.PI) / 180);
+  const scaleStart = project(scaleLat, scaleLon);
+  const scaleEnd = project(scaleLat, scaleLon + 5 / kmPerLonDegree);
+  svg.appendChild(svgElement("line", { class: "scale-bar", x1: scaleStart.x, y1: scaleStart.y, x2: scaleEnd.x, y2: scaleEnd.y }));
+  addSvgText("5 km", { class: "scale-label", x: scaleStart.x, y: scaleStart.y - 8 });
+
+  addSvgText("N", { class: "north-label", x: 960, y: 52 });
+  svg.appendChild(svgElement("line", { class: "north-arrow", x1: 960, y1: 84, x2: 960, y2: 56 }));
+  svg.appendChild(svgElement("path", { class: "north-arrow", d: "M960 52 L951 68 L969 68 Z" }));
+}
+
 function renderMap() {
   svg.innerHTML = "";
   svg.setAttribute("viewBox", "0 0 1000 1000");
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
-  const water = svgElement("rect", { x: 0, y: 0, width: 1000, height: 1000, fill: "transparent" });
-  svg.appendChild(water);
+  renderBasemap();
 
   if (modeAllows("vessels")) {
     for (const vessel of filteredVessels()) {
@@ -201,6 +278,11 @@ function audioProfileHtml(audio) {
   if (!audio) {
     return `<p>No audio profile linked yet</p>`;
   }
+  if (audio.captured === false) {
+    return `
+      <div class="timeline">${clean(audio.captureNote)}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
+    `;
+  }
   const bands = Object.entries(audio.bands || {});
   const values = bands.map(([, value]) => Number(value)).filter((value) => !Number.isNaN(value));
   const min = values.length ? Math.min(...values) : -80;
@@ -221,10 +303,10 @@ function audioProfileHtml(audio) {
       <div class="metric"><span>RMS</span><b>${fmt(audio.rmsDbfsMean, 1, " dBFS")}</b></div>
       <div class="metric"><span>Peak</span><b>${fmt(audio.peakDbfs, 1, " dBFS")}</b></div>
       <div class="metric"><span>Crest</span><b>${fmt(audio.crestFactorDb, 1, " dB")}</b></div>
-      <div class="metric"><span>Stereo corr.</span><b>${fmt(audio.stereoCorrelation, 2)}</b></div>
+      <div class="metric"><span>Coverage</span><b>${fmt(audio.coverageSeconds, 1, " s")}</b></div>
     </div>
     ${bandRows}
-    <div class="timeline">${clean(audio.fileName)}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
+    <div class="timeline">${clean(audio.captureNote)}<br>${clean(audio.fileName)}<br>${clean(audio.startUtc)} to ${clean(audio.endUtc)}</div>
   `;
 }
 
@@ -262,6 +344,8 @@ function renderCtdDetail(event) {
     </div>
     <h3 class="section-title">Cast window</h3>
     <div class="timeline">${clean(event.startUtc)}<br>${clean(event.endUtc)}</div>
+    <h3 class="section-title">Acoustic profile</h3>
+    ${audioProfileHtml(event.audio)}
   `;
 }
 

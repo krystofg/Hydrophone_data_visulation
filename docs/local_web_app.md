@@ -13,6 +13,7 @@ This writes:
 - `web/data/app_data.json`
 
 The JSON is generated from processed outputs, not raw 30 GB recordings or raw AIS dumps. It is ignored by Git.
+The clickable build also creates `outputs/processing/event_audio_profiles.csv`, which contains separate acoustic windows for selected vessels and CTD events.
 
 ## Build clickable app
 
@@ -25,6 +26,16 @@ Open the generated file directly:
 - `web/hydrophone_app.html`
 
 The standalone file embeds the compact data JSON, CSS, and JavaScript. It does not use OpenStreetMap, Leaflet, remote map tiles, or a localhost server.
+
+## Full rebuild from raw processed data
+
+Run the full processing chain when all recordings and AIS rows should be included:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\run_full_processing_and_build_app.ps1
+```
+
+This runs AIS preparation, audio feature extraction, AIS/audio joining, per-event acoustic profile generation, and the final standalone HTML build.
 
 ## Data flow
 

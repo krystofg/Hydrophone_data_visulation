@@ -211,11 +211,7 @@ p {
 }
 
 .map-panel {
-  background:
-    linear-gradient(rgba(26, 44, 65, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(26, 44, 65, 0.06) 1px, transparent 1px),
-    #eef4f4;
-  background-size: 36px 36px;
+  background: #d7edf2;
   min-height: 0;
   position: relative;
 }
@@ -267,6 +263,58 @@ p {
   stroke: var(--vessel);
   stroke-linecap: round;
   stroke-width: 2;
+}
+
+.water {
+  fill: #d7edf2;
+}
+
+.land {
+  fill: #edf0e5;
+  opacity: 0.96;
+  stroke: #c7cfba;
+  stroke-width: 1.5;
+}
+
+.coast {
+  fill: none;
+  opacity: 0.85;
+  stroke: #71886e;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.grid-line {
+  opacity: 0.42;
+  stroke: #8ca6b4;
+  stroke-dasharray: 5 8;
+  stroke-width: 1;
+}
+
+.grid-label,
+.scale-label,
+.place-label,
+.north-label {
+  fill: #405161;
+  font-size: 18px;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 4px;
+}
+
+.place-label {
+  fill: #6e755f;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.scale-bar,
+.north-arrow {
+  fill: #405161;
+  stroke: #405161;
+  stroke-linecap: round;
+  stroke-width: 5;
 }
 
 .track.is-selected {

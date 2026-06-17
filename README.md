@@ -66,4 +66,10 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build_clickable_app.ps1
 
 Open `web/hydrophone_app.html` in a browser.
 
-The app shows vessels, CTD casts, the hydrophone location, and the linked acoustic profile for the selected vessel. See `docs/local_web_app.md`.
+The app shows vessels, CTD casts, the hydrophone location, and per-event acoustic profiles for selected vessels and CTD casts. See `docs/local_web_app.md`.
+
+For full processing from raw AIS/audio outputs through the final app:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\run_full_processing_and_build_app.ps1
+```

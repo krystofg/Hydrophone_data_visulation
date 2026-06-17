@@ -36,6 +36,9 @@ AUDIO_FEATURE_CANDIDATES = [
     Path("outputs/processing/audio_features_5_smoke.csv"),
     Path("outputs/processing/audio_features_smoke.csv"),
 ]
+EVENT_AUDIO_PROFILE_CANDIDATES = [
+    Path("outputs/processing/event_audio_profiles.csv"),
+]
 CTD_CANDIDATES = [
     Path("outputs/ctd_events.csv"),
 ]
@@ -65,11 +68,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ais-csv", type=Path, default=None)
     parser.add_argument("--audio-events-csv", type=Path, default=None)
     parser.add_argument("--audio-features-csv", type=Path, default=None)
+    parser.add_argument("--event-audio-profiles-csv", type=Path, default=None)
     parser.add_argument("--ctd-events-csv", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("web/data/app_data.json"))
-    parser.add_argument("--max-vessels", type=int, default=160)
+    parser.add_argument("--max-vessels", type=int, default=0, help="Maximum vessels to include; 0 means all.")
     parser.add_argument("--max-track-points-per-vessel", type=int, default=80)
-    parser.add_argument("--max-ais-rows", type=int, default=250_000)
+    parser.add_argument("--max-ais-rows", type=int, default=0, help="Maximum AIS rows to read; 0 means all.")
     return parser.parse_args()
 
 
@@ -203,6 +207,48 @@ def read_audio_profiles(path: Path | None) -> list[dict[str, object]]:
     return rows
 
 
+def profile_from_row(row: dict[str, str]) -> dict[str, object]:
+    return {
+        "fileName": row.get("file_name") or row.get("recording_files", ""),
+        "startUtc": row.get("start_utc") or row.get("window_start_utc", ""),
+        "endUtc": row.get("end_utc") or row.get("window_end_utc", ""),
+        "eventTimeUtc": row.get("event_time_utc", ""),
+        "rmsDbfsMean": parse_float(row.get("rms_dbfs_mean")),
+        "peakDbfs": parse_float(row.get("peak_dbfs")),
+        "crestFactorDb": parse_float(row.get("crest_factor_db")),
+        "stereoCorrelation": parse_float(row.get("stereo_correlation")),
+        "coverageSeconds": parse_float(row.get("coverage_seconds")),
+        "captured": str(row.get("captured", "")).lower() == "true",
+        "captureNote": row.get("capture_note", ""),
+        "bands": {
+            "20-100 Hz": parse_float(row.get("band_20_100_db")),
+            "100-500 Hz": parse_float(row.get("band_100_500_db")),
+            "500-2000 Hz": parse_float(row.get("band_500_2000_db")),
+            "2000-10000 Hz": parse_float(row.get("band_2000_10000_db")),
+        },
+        "nearbyVesselCount": parse_float(row.get("nearby_vessel_count")),
+        "closestShipId": row.get("closest_ship_id", ""),
+        "closestName": row.get("closest_name", ""),
+        "closestDistanceKm": parse_float(row.get("closest_distance_km")),
+    }
+
+
+def read_event_audio_profiles(path: Path | None) -> dict[str, dict[str, dict[str, object]]]:
+    profiles: dict[str, dict[str, dict[str, object]]] = {"vessel": {}, "ctd": {}}
+    if path is None or not path.exists():
+        return profiles
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as csv_file:
+        for row in csv.DictReader(csv_file):
+            event_type = row.get("event_type", "").strip().lower()
+            event_id = row.get("event_id", "").strip()
+            if event_type not in profiles or not event_id:
+                continue
+            profile = profile_from_row(row)
+            profile["eventLabel"] = row.get("event_label", "")
+            profiles[event_type][event_id] = profile
+    return profiles
+
+
 def audio_for_vessel(vessel: dict[str, object], profiles: list[dict[str, object]]) -> dict[str, object] | None:
     if not profiles:
         return None
@@ -235,6 +281,7 @@ def audio_for_vessel(vessel: dict[str, object], profiles: list[dict[str, object]
 def read_vessels(
     path: Path | None,
     profiles: list[dict[str, object]],
+    event_profiles: dict[str, dict[str, dict[str, object]]],
     max_vessels: int,
     max_track_points_per_vessel: int,
     max_ais_rows: int,
@@ -247,7 +294,7 @@ def read_vessels(
         reader = csv.DictReader(csv_file)
         mapping = column_map(reader.fieldnames)
         for index, row in enumerate(reader):
-            if index >= max_ais_rows:
+            if max_ais_rows > 0 and index >= max_ais_rows:
                 break
             lat = parse_float(get_field(row, mapping, "lat"))
             lon = parse_float(get_field(row, mapping, "lon"))
@@ -306,7 +353,7 @@ def read_vessels(
             "maxLength": max(length_values) if length_values else None,
             "maxDraught": max(draught_values) if draught_values else None,
         }
-        vessel["audio"] = audio_for_vessel(vessel, profiles)
+        vessel["audio"] = event_profiles.get("vessel", {}).get(ship_id) or audio_for_vessel(vessel, profiles)
         vessels.append(vessel)
 
     vessels.sort(
@@ -315,10 +362,12 @@ def read_vessels(
             -float(vessel.get("maxLength") or 0.0),
         )
     )
-    return vessels[:max_vessels]
+    if max_vessels > 0:
+        return vessels[:max_vessels]
+    return vessels
 
 
-def read_ctd_events(path: Path | None) -> list[dict[str, object]]:
+def read_ctd_events(path: Path | None, event_profiles: dict[str, dict[str, dict[str, object]]]) -> list[dict[str, object]]:
     if path is None or not path.exists():
         return []
     events: list[dict[str, object]] = []
@@ -328,8 +377,8 @@ def read_ctd_events(path: Path | None) -> list[dict[str, object]]:
             lon = parse_float(row.get("longitude"))
             if lat is None or lon is None:
                 continue
-            events.append(
-                {
+            event_id = row.get("station") or row.get("file_name", "")
+            event = {
                     "id": row.get("station") or row.get("file_name", ""),
                     "fileName": row.get("file_name", ""),
                     "station": row.get("station", ""),
@@ -346,7 +395,8 @@ def read_ctd_events(path: Path | None) -> list[dict[str, object]]:
                     "salinityMinPsu": parse_float(row.get("salinity_min_psu")),
                     "salinityMaxPsu": parse_float(row.get("salinity_max_psu")),
                 }
-            )
+            event["audio"] = event_profiles.get("ctd", {}).get(str(event_id))
+            events.append(event)
     events.sort(key=lambda event: str(event.get("startUtc", "")))
     return events
 
@@ -376,17 +426,20 @@ def main() -> None:
     ais_csv = args.ais_csv or first_existing(AIS_CANDIDATES)
     audio_events_csv = args.audio_events_csv or first_existing(AUDIO_EVENT_CANDIDATES)
     audio_features_csv = args.audio_features_csv or first_existing(AUDIO_FEATURE_CANDIDATES)
+    event_audio_profiles_csv = args.event_audio_profiles_csv or first_existing(EVENT_AUDIO_PROFILE_CANDIDATES)
     ctd_events_csv = args.ctd_events_csv or first_existing(CTD_CANDIDATES)
 
     profiles = read_audio_profiles(audio_events_csv) or read_audio_profiles(audio_features_csv)
+    event_profiles = read_event_audio_profiles(event_audio_profiles_csv)
     vessels = read_vessels(
         ais_csv,
         profiles,
+        event_profiles,
         max_vessels=args.max_vessels,
         max_track_points_per_vessel=args.max_track_points_per_vessel,
         max_ais_rows=args.max_ais_rows,
     )
-    ctd_events = read_ctd_events(ctd_events_csv)
+    ctd_events = read_ctd_events(ctd_events_csv, event_profiles)
     data = {
         "metadata": {
             "generatedAtUtc": iso(dt.datetime.now(tz=UTC)),
@@ -394,11 +447,13 @@ def main() -> None:
                 "aisCsv": str(ais_csv) if ais_csv else "",
                 "audioEventsCsv": str(audio_events_csv) if audio_events_csv else "",
                 "audioFeaturesCsv": str(audio_features_csv) if audio_features_csv else "",
+                "eventAudioProfilesCsv": str(event_audio_profiles_csv) if event_audio_profiles_csv else "",
                 "ctdEventsCsv": str(ctd_events_csv) if ctd_events_csv else "",
             },
             "vesselCount": len(vessels),
             "ctdCount": len(ctd_events),
             "audioProfileCount": len(profiles),
+            "eventAudioProfileCount": sum(len(items) for items in event_profiles.values()),
         },
         "hydrophone": HYDROPHONE,
         "bounds": bounds_for(vessels, ctd_events),
